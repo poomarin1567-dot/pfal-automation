@@ -3,29 +3,104 @@ const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const pool = require('./db');
 const path = require('path');
-const delay = ms => new Promise(resolve => setTimeout(resolve, ms)); // ✅ เพิ่มบรรทัดนี้
+const WebSocket = require('ws');
+
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms)); 
 require('dotenv').config();
 
-const mqtt = require('mqtt');  // ✅ เพิ่มบรรทัดนี้
+// ✅ Environment Variables Validation
+const requiredEnvVars = [
+  'PORT', 'DB_HOST', 'DB_PORT', 'DB_USER', 'DB_PASSWORD', 'DB_DATABASE',
+  'MQTT_HOST', 'MQTT_USERNAME', 'MQTT_PASSWORD'
+];
+
+const missingVars = requiredEnvVars.filter(varName => !process.env[varName]);
+if (missingVars.length > 0) {
+  console.error('❌ Missing required environment variables:', missingVars.join(', '));
+  console.error('Please check your .env file');
+  process.exit(1);
+}
+
+const mqtt = require('mqtt');  
 
 // ✅ เชื่อมต่อกับ MQTT Server
-const mqttClient = mqtt.connect("mqtt://automate.cat-smartgrow.com", {
-  username: "test_01",
-  password: "Test01!"
+const mqttClient = mqtt.connect(`mqtt://${process.env.MQTT_HOST}`, {
+  username: process.env.MQTT_USERNAME,
+  password: process.env.MQTT_PASSWORD
 });
 
 
 
 
 const app = express();
+
+// ✅ Security headers
+app.use((req, res, next) => {
+  res.header('X-Content-Type-Options', 'nosniff');
+  res.header('X-Frame-Options', 'DENY');
+  res.header('X-XSS-Protection', '1; mode=block');
+  res.header('Referrer-Policy', 'strict-origin-when-cross-origin');
+  next();
+});
+
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '10mb' })); // ✅ Limit payload size
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+// ✅ Simple rate limiting (relaxed settings)
+const requestCounts = new Map();
+const RATE_LIMIT_WINDOW = 60000; // 1 minute
+const MAX_REQUESTS = 300; // max requests per window (increased from 100)
+
+app.use((req, res, next) => {
+  const clientIP = req.ip || req.connection.remoteAddress;
+  const now = Date.now();
+  
+  if (!requestCounts.has(clientIP)) {
+    requestCounts.set(clientIP, { count: 1, resetTime: now + RATE_LIMIT_WINDOW });
+  } else {
+    const clientData = requestCounts.get(clientIP);
+    if (now > clientData.resetTime) {
+      requestCounts.set(clientIP, { count: 1, resetTime: now + RATE_LIMIT_WINDOW });
+    } else {
+      clientData.count++;
+      if (clientData.count > MAX_REQUESTS) {
+        return res.status(429).json({ error: 'ส่งคำขอมากเกินไป กรุณารอสักครู่' });
+      }
+    }
+  }
+  next();
+});
 
 // ✅ Serve frontend files
 app.use(express.static(path.join(__dirname)));
 
 app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'index.html'));
+});
+
+// ✅ Health Check API
+app.get('/api/health', async (req, res) => {
+  try {
+    const dbCheck = await pool.query('SELECT 1');
+    const mqttStatus = mqttClient.connected ? 'connected' : 'disconnected';
+    
+    res.json({
+      status: 'healthy',
+      timestamp: new Date().toISOString(),
+      database: 'connected',
+      mqtt: mqttStatus,
+      websocket_clients: clients.size,
+      uptime: process.uptime()
+    });
+  } catch (err) {
+    console.error('❌ Health check failed:', err.message);
+    res.status(503).json({
+      status: 'unhealthy',
+      timestamp: new Date().toISOString(),
+      error: err.message
+    });
+  }
 });
 
 
@@ -43,44 +118,18 @@ async function logActivity({ userId, activity, action_type, category = null, sta
   }
 }
 
-
-
-// ✅ REGISTER
-app.post('/api/register', async (req, res) => {
-  const { username, password, role } = req.body;
-  console.log("\uD83D\uDCE8 register request", username, role);
-
-  if (!username || !password || !role) {
-    return res.status(400).json({ error: 'กรอกข้อมูลไม่ครบ' });
-  }
-
-  try {
-    const check = await pool.query("SELECT * FROM users WHERE username = $1", [username]);
-    if (check.rows.length > 0) {
-      console.log("⚠️ Username already exists:", username);
-      return res.status(409).json({ error: "Username นี้มีอยู่แล้ว" });
-    }
-
-    const hashedPassword = await bcrypt.hash(password, 10);
-
-    const result = await pool.query(
-      "INSERT INTO users (username, password_hash, role, created_at) VALUES ($1, $2, $3, NOW()) RETURNING *",
-      [username, hashedPassword, role]
-    );
-
-    console.log("✅ Inserted user:", result.rows[0]);
-
-    res.json({ message: "สมัครสมาชิกสำเร็จ", user: result.rows[0] });
-  } catch (err) {
-    console.error("❌ Register error:", err);
-    res.status(500).json({ error: "เกิดข้อผิดพลาดที่เซิร์ฟเวอร์" });
-  }
-});
-
-
 // ✅ LOGIN
 app.post('/api/login', async (req, res) => {
   const { username, password } = req.body;
+  
+  // ✅ Input validation
+  if (!username || !password) {
+    return res.status(400).json({ error: 'กรุณากรอกชื่อผู้ใช้และรหัสผ่าน' });
+  }
+  
+  if (typeof username !== 'string' || typeof password !== 'string') {
+    return res.status(400).json({ error: 'ข้อมูลไม่ถูกต้อง' });
+  }
   console.log("\uD83D\uDD10 login request", username);
 
   try {
@@ -126,6 +175,7 @@ app.post('/api/tray/inbound', async (req, res) => {
     username, station, floor, slot, veg_type, quantity, 
     batch_id, seeding_date, notes, tray_id: existing_tray_id 
   } = req.body;
+  
   
   const created_at = new Date();
 
@@ -507,11 +557,116 @@ app.get('/api/logs', async (req, res) => {
   }
 });
 
-// ✅ START SERVER
+// ✅ START SERVER with WebSocket
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, '0.0.0.0', () => {
+const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Server is running at http://0.0.0.0:${PORT}`);
+  
+  // ✅ Initialize cameras on server start
+  initializeCameras();
 });
+
+// ✅ WebSocket Server for real-time updates
+const wss = new WebSocket.Server({ server });
+const clients = new Set();
+
+wss.on('connection', (ws) => {
+  clients.add(ws);
+  console.log('🔗 New WebSocket client connected. Total clients:', clients.size);
+  
+  // ✅ Heartbeat to detect dead connections
+  ws.isAlive = true;
+  ws.on('pong', () => {
+    ws.isAlive = true;
+  });
+  
+  ws.on('close', () => {
+    clients.delete(ws);
+    console.log('❌ WebSocket client disconnected. Total clients:', clients.size);
+  });
+  
+  ws.on('error', (error) => {
+    console.error('❌ WebSocket error:', error);
+    clients.delete(ws);
+  });
+});
+
+// ✅ Cleanup dead connections every 30 seconds
+const heartbeatInterval = setInterval(() => {
+  wss.clients.forEach((ws) => {
+    if (!ws.isAlive) {
+      clients.delete(ws);
+      return ws.terminate();
+    }
+    ws.isAlive = false;
+    ws.ping();
+  });
+}, 30000);
+
+// ✅ Graceful shutdown
+const activeTimers = [heartbeatInterval];
+
+// ✅ เรียกใช้ scheduler และเพิ่ม timer ใน activeTimers
+function initializeScheduler() {
+  const schedulerInterval = setInterval(async () => {
+    try {
+      for (let floor = 1; floor <= 5; floor++) {
+        // Scheduler logic here
+      }
+    } catch (err) {
+      console.error('❌ Scheduler Error:', err.message);
+    }
+  }, 60000); // ทุก 1 นาที
+  
+  activeTimers.push(schedulerInterval);
+  return schedulerInterval;
+}
+
+process.on('SIGTERM', () => {
+  console.log('🔄 SIGTERM received, shutting down gracefully...');
+  gracefulShutdown();
+});
+
+process.on('SIGINT', () => {
+  console.log('🔄 SIGINT received, shutting down gracefully...');
+  gracefulShutdown();
+});
+
+function gracefulShutdown() {
+  // Clear all timers
+  activeTimers.forEach(timer => clearInterval(timer));
+  
+  // Clear sensor debounce timers
+  Object.values(stationStates).forEach(state => {
+    if (state.sensorDebounceTimer) {
+      clearTimeout(state.sensorDebounceTimer);
+    }
+  });
+  
+  // Close WebSocket connections
+  wss.clients.forEach(ws => ws.close());
+  
+  // Close MQTT connection
+  if (mqttClient) {
+    mqttClient.end();
+  }
+  
+  // Close HTTP server
+  server.close(() => {
+    console.log('✅ HTTP server closed.');
+    process.exit(0);
+  });
+}
+
+// ✅ Broadcast function to send data to all connected clients
+function broadcastToClients(type, data) {
+  const message = JSON.stringify({ type, data });
+  clients.forEach(client => {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(message);
+    }
+  });
+}
 
 // ✅ POST /api/log - สำหรับให้ฝั่งหน้าเว็บส่ง Log ได้ตรง
 // ✅ POST /api/log - สำหรับให้ frontend ส่ง log มา
@@ -688,6 +843,72 @@ app.get('/api/stats/summary', async (req, res) => {
   }
 });
 
+// ✅ Overview API สำหรับหน้า overview
+app.get('/api/overview', async (req, res) => {
+  try {
+    const station = parseInt(req.query.station) || 1;
+    
+    // รวมข้อมูลทั้งหมดที่ overview ต้องการ
+    const [summaryRes, weeklyRes] = await Promise.all([
+      pool.query(`
+        SELECT COUNT(*) as total,
+          COUNT(CASE WHEN action_type = 'inbound' THEN 1 END) as inbound,
+          COUNT(CASE WHEN action_type = 'outbound' THEN 1 END) as outbound
+        FROM tray_history WHERE station_id = $1
+      `, [station]),
+      
+      pool.query(`
+        SELECT DATE(created_at) as date,
+          COUNT(CASE WHEN action_type = 'inbound' THEN 1 END) as inbound,
+          COUNT(CASE WHEN action_type = 'outbound' THEN 1 END) as outbound
+        FROM tray_history 
+        WHERE station_id = $1 AND created_at >= NOW() - INTERVAL '7 days'
+        GROUP BY DATE(created_at)
+        ORDER BY date DESC
+      `, [station])
+    ]);
+
+    const summary = summaryRes.rows[0];
+    res.json({
+      summary: {
+        total: parseInt(summary.total),
+        inbound: parseInt(summary.inbound),
+        outbound: parseInt(summary.outbound)
+      },
+      weekly: weeklyRes.rows
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ✅ Summary Cards API
+app.get('/api/overview/summary-cards', async (req, res) => {
+  try {
+    const station = parseInt(req.query.station) || 1;
+    
+    const result = await pool.query(`
+      SELECT 
+        COUNT(*) as total_trays,
+        COUNT(CASE WHEN action_type = 'inbound' THEN 1 END) as inbound_today,
+        COUNT(CASE WHEN action_type = 'outbound' THEN 1 END) as outbound_today,
+        COUNT(DISTINCT CASE WHEN created_at >= CURRENT_DATE THEN tray_id END) as active_trays
+      FROM tray_history 
+      WHERE station_id = $1 AND created_at >= CURRENT_DATE
+    `, [station]);
+
+    const stats = result.rows[0];
+    res.json({
+      total_trays: parseInt(stats.total_trays),
+      inbound_today: parseInt(stats.inbound_today),
+      outbound_today: parseInt(stats.outbound_today),
+      active_trays: parseInt(stats.active_trays)
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 
 app.get('/api/stats/weekly', async (req, res) => {
   try {
@@ -712,7 +933,64 @@ app.get('/api/stats/weekly', async (req, res) => {
   }
 });
 
+// ✅ API สำหรับดึงข้อมูลตามชั่วโมง (24 ชั่วโมงย้อนหลัง)
+app.get('/api/stats/hourly', async (req, res) => {
+  try {
+    const station = parseInt(req.query.station);
+    if (!station) return res.status(400).json({ error: "Missing station ID" });
 
+    const hourlyData = await pool.query(`
+      SELECT 
+        EXTRACT(HOUR FROM created_at) as hour,
+        COUNT(CASE WHEN action_type = 'inbound' THEN 1 END) as inbound,
+        COUNT(CASE WHEN action_type = 'outbound' THEN 1 END) as outbound
+      FROM tray_history 
+      WHERE station_id = $1 
+        AND created_at >= NOW() - INTERVAL '24 hours'
+      GROUP BY EXTRACT(HOUR FROM created_at)
+      ORDER BY hour
+    `, [station]);
+
+    // สร้างข้อมูล 24 ชั่วโมง (เติม 0 สำหรับชั่วโมงที่ไม่มีข้อมูล)
+    const hours = Array.from({length: 24}, (_, i) => i);
+    const result = hours.map(hour => {
+      const found = hourlyData.rows.find(row => parseInt(row.hour) === hour);
+      return {
+        hour: hour,
+        inbound: found ? parseInt(found.inbound) : 0,
+        outbound: found ? parseInt(found.outbound) : 0
+      };
+    });
+
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ✅ [เพิ่มใหม่] API สำหรับดึงข้อมูลกราฟย้อนหลัง 30 วัน
+app.get('/api/stats/monthly', async (req, res) => {
+  try {
+    const station = parseInt(req.query.station);
+    if (!station) return res.status(400).json({ error: "Missing station ID" });
+
+    const result = await pool.query(`
+      SELECT 
+        TO_CHAR(created_at::date, 'DD/MM') AS date,
+        SUM(CASE WHEN action_type = 'inbound' THEN 1 ELSE 0 END) AS inbound,
+        SUM(CASE WHEN action_type = 'outbound' THEN 1 ELSE 0 END) AS outbound
+      FROM tray_history
+      WHERE created_at >= NOW() - INTERVAL '30 days' -- ✨ จุดสำคัญ: เปลี่ยนจาก 7 เป็น 30 days
+        AND station_id = $1
+      GROUP BY date
+      ORDER BY MIN(created_at)
+    `, [station]);
+
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 app.get('/api/stats/hourly', async (req, res) => {
   try {
@@ -737,59 +1015,265 @@ app.get('/api/stats/hourly', async (req, res) => {
   }
 });
 
-
-
-async function simulateTrayInbound(veg, currentStation, floor, slot) {
+// ✅ สร้างตารางสำหรับระบบแผนการปลูกและใบงาน
+const initializeTables = async () => {
   try {
-    const res = await fetch("http://localhost:3000/api/tray/inbound", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        userId: 1, // ✅ แก้เป็น user จริง
-        veg_type: veg,
-        station: currentStation,
-        floor: parseInt(floor),
-        slot: parseInt(slot)
-      })
+    // ✅ ตาราง planting_plans - เก็บข้อมูลแผนการปลูกจากภายนอก
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS planting_plans (
+        id SERIAL PRIMARY KEY,
+        external_plan_id VARCHAR(50),
+        vegetable_name VARCHAR(100) NOT NULL,
+        level INTEGER NOT NULL,
+        planting_date DATE NOT NULL,
+        harvest_date DATE NOT NULL,
+        plant_count INTEGER NOT NULL,
+        variety VARCHAR(100),
+        batch_number VARCHAR(50),
+        source_system VARCHAR(100),
+        received_at TIMESTAMP DEFAULT NOW(),
+        status VARCHAR(20) DEFAULT 'received',
+        notes TEXT,
+        created_at TIMESTAMP DEFAULT NOW(),
+        updated_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+
+    // ✅ ตาราง work_orders - ใบงานที่สร้างจากแผนการปลูก
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS work_orders (
+        id SERIAL PRIMARY KEY,
+        planting_plan_id INTEGER REFERENCES planting_plans(id),
+        work_order_number VARCHAR(50) UNIQUE,
+        task_type VARCHAR(50) NOT NULL,
+        vegetable_name VARCHAR(100) NOT NULL,
+        level INTEGER NOT NULL,
+        target_date DATE NOT NULL,
+        plant_count INTEGER NOT NULL,
+        assigned_to VARCHAR(100),
+        priority VARCHAR(20) DEFAULT 'normal',
+        status VARCHAR(20) DEFAULT 'pending',
+        progress INTEGER DEFAULT 0,
+        actual_count INTEGER,
+        completed_at TIMESTAMP,
+        notes TEXT,
+        created_at TIMESTAMP DEFAULT NOW(),
+        updated_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+
+    // ✅ ตาราง work_order_tasks - รายละเอียดงานย่อย
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS work_order_tasks (
+        id SERIAL PRIMARY KEY,
+        work_order_id INTEGER REFERENCES work_orders(id),
+        task_name VARCHAR(100) NOT NULL,
+        description TEXT,
+        sequence_order INTEGER,
+        estimated_duration INTEGER,
+        actual_duration INTEGER,
+        status VARCHAR(20) DEFAULT 'pending',
+        assigned_to VARCHAR(100),
+        completed_at TIMESTAMP,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+
+    console.log('✅ Database tables initialized successfully');
+  } catch (err) {
+    console.error('❌ Error initializing tables:', err.message);
+  }
+};
+
+// เรียกใช้ฟังก์ชันสร้างตาราง
+initializeTables();
+
+// ✅ API endpoint สำหรับรับข้อมูลแผนการปลูกจากภายนอก
+app.post('/api/planting-plan', async (req, res) => {
+  try {
+    const { vegetable_name, level, planting_date, harvest_date, plant_count, variety, batch_number, source_system, external_plan_id } = req.body;
+    
+    // ✅ Validate ข้อมูลที่จำเป็น
+    if (!vegetable_name || !level || !planting_date || !harvest_date || !plant_count) {
+      return res.status(400).json({ 
+        error: 'Missing required fields: vegetable_name, level, planting_date, harvest_date, plant_count' 
+      });
+    }
+
+    // ✅ บันทึกข้อมูลแผนการปลูก
+    const planResult = await pool.query(`
+      INSERT INTO planting_plans (
+        external_plan_id, vegetable_name, level, planting_date, harvest_date, 
+        plant_count, variety, batch_number, source_system, status
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'received')
+      RETURNING *
+    `, [external_plan_id, vegetable_name, level, planting_date, harvest_date, plant_count, variety, batch_number, source_system]);
+
+    const plan = planResult.rows[0];
+
+    // ✅ สร้างใบงานอัตโนมัติ
+    const workOrderNumber = `WO-${Date.now()}-${plan.id}`;
+    
+    // สร้างใบงานปลูก
+    const plantingOrder = await pool.query(`
+      INSERT INTO work_orders (
+        planting_plan_id, work_order_number, task_type, vegetable_name, 
+        level, target_date, plant_count, priority, status
+      ) VALUES ($1, $2, 'planting', $3, $4, $5, $6, 'high', 'pending')
+      RETURNING *
+    `, [plan.id, `${workOrderNumber}-PLANT`, vegetable_name, level, planting_date, plant_count]);
+
+    // สร้างใบงานเก็บเกี่ยว
+    const harvestOrder = await pool.query(`
+      INSERT INTO work_orders (
+        planting_plan_id, work_order_number, task_type, vegetable_name, 
+        level, target_date, plant_count, priority, status
+      ) VALUES ($1, $2, 'harvest', $3, $4, $5, $6, 'normal', 'pending')
+      RETURNING *
+    `, [plan.id, `${workOrderNumber}-HARVEST`, vegetable_name, level, harvest_date, plant_count]);
+
+    console.log(`✅ Created planting plan and work orders for ${vegetable_name} on level ${level}`);
+    
+    res.json({
+      success: true,
+      message: 'Planting plan received and work orders created',
+      planting_plan: plan,
+      work_orders: [plantingOrder.rows[0], harvestOrder.rows[0]]
     });
 
-    const result = await res.json();
-    console.log("✅ Inbound Result:", result);
   } catch (err) {
-    console.error("❌ Inbound Error:", err.message);
+    console.error('❌ Error processing planting plan:', err.message);
+    res.status(500).json({ error: err.message });
   }
-}
+});
 
-async function simulateTrayOutbound(veg, currentStation, floor, slot) {
+// ✅ API endpoint สำหรับดึงรายการแผนการปลูก
+app.get('/api/planting-plans', async (req, res) => {
   try {
-    const res = await fetch("http://localhost:3000/api/tray/outbound", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        userId: 1,
-        veg_type: veg,
-        station: currentStation,
-        floor: parseInt(floor),
-        slot: parseInt(slot)
-      })
+    const result = await pool.query(`
+      SELECT * FROM planting_plans 
+      ORDER BY created_at DESC
+    `);
+    
+    res.json({
+      success: true,
+      planting_plans: result.rows
     });
-
-    const result = await res.json();
-    console.log("✅ Outbound Result:", result);
   } catch (err) {
-    console.error("❌ Outbound Error:", err.message);
+    console.error('❌ Error fetching planting plans:', err.message);
+    res.status(500).json({ error: err.message });
   }
-}
+});
+
+// ✅ API endpoint สำหรับดึงรายการใบงาน
+app.get('/api/work-orders', async (req, res) => {
+  try {
+    const { status, task_type } = req.query;
+    let query = `
+      SELECT wo.*, pp.variety, pp.batch_number 
+      FROM work_orders wo
+      LEFT JOIN planting_plans pp ON wo.planting_plan_id = pp.id
+      WHERE 1=1
+    `;
+    const params = [];
+    
+    if (status) {
+      params.push(status);
+      query += ` AND wo.status = $${params.length}`;
+    }
+    
+    if (task_type) {
+      params.push(task_type);
+      query += ` AND wo.task_type = $${params.length}`;
+    }
+    
+    query += ` ORDER BY wo.created_at DESC`;
+    
+    const result = await pool.query(query, params);
+    
+    res.json({
+      success: true,
+      work_orders: result.rows
+    });
+  } catch (err) {
+    console.error('❌ Error fetching work orders:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ✅ API endpoint สำหรับอัพเดทสถานะใบงาน
+app.put('/api/work-orders/:id/status', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status, progress, actual_count, assigned_to, notes } = req.body;
+    
+    if (!['pending', 'in_progress', 'completed', 'cancelled'].includes(status)) {
+      return res.status(400).json({ 
+        error: 'Invalid status. Must be: pending, in_progress, completed, cancelled' 
+      });
+    }
+
+    const updateFields = ['status = $2', 'updated_at = NOW()'];
+    const params = [id, status];
+    let paramIndex = 2;
+
+    if (progress !== undefined) {
+      updateFields.push(`progress = $${++paramIndex}`);
+      params.push(progress);
+    }
+
+    if (actual_count !== undefined) {
+      updateFields.push(`actual_count = $${++paramIndex}`);
+      params.push(actual_count);
+    }
+
+    if (assigned_to) {
+      updateFields.push(`assigned_to = $${++paramIndex}`);
+      params.push(assigned_to);
+    }
+
+    if (notes) {
+      updateFields.push(`notes = $${++paramIndex}`);
+      params.push(notes);
+    }
+
+    if (status === 'completed') {
+      updateFields.push('completed_at = NOW()');
+    }
+
+    const result = await pool.query(`
+      UPDATE work_orders 
+      SET ${updateFields.join(', ')}
+      WHERE id = $1 
+      RETURNING *
+    `, params);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Work order not found' });
+    }
+
+    res.json({
+      success: true,
+      message: 'Work order updated successfully',
+      work_order: result.rows[0]
+    });
+  } catch (err) {
+    console.error('❌ Error updating work order:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 const stationStates = {
   1: {
     flowState: 'idle',
     latestLiftStatus: {},
     latestAgvStatus: {},
+    latestAgvSensorStatus: {},
     trayActionDone: false,
     targetFloor: null,
     targetSlot: null,
-    taskType: null // 'inbound' หรือ 'outbound'
+    taskType: null, // 'inbound' หรือ 'outbound'
+    sensorDebounceTimer: null // สำหรับ debounce sensor updates
   }
 };
 
@@ -804,6 +1288,7 @@ mqttClient.on('connect', () => {
   mqttClient.subscribe("automation/station1/lift/status");
   mqttClient.subscribe('automation/station1/agv/status');
   mqttClient.subscribe("automation/station1/lift/tray_action_done");
+  mqttClient.subscribe("automation/station1/agv/sensors");
 });
 
 // MQTT Message Handler (รวม Logic ของ Lift, AGV, และ Tray)
@@ -813,6 +1298,38 @@ mqttClient.on('message', async (topic, message) => {
   const state = stationStates[stationId];
   if (!state) return; // ป้องกันข้อผิดพลาดหากไม่มี state
 
+// ✅ [เพิ่มใหม่] Logic สำหรับรับข้อมูลเซ็นเซอร์ AGV พร้อม Debounce
+  if (topic === 'automation/station1/agv/sensors') {
+    try {
+      const payload = JSON.parse(msg);
+      
+      // ✅ เช็คว่าข้อมูลเปลี่ยนแปลงหรือไม่ก่อนส่ง
+      const currentSensorData = JSON.stringify(payload);
+      const previousSensorData = JSON.stringify(state.latestAgvSensorStatus || {});
+      
+      if (currentSensorData !== previousSensorData) {
+        // Clear existing debounce timer
+        if (state.sensorDebounceTimer) {
+          clearTimeout(state.sensorDebounceTimer);
+        }
+        
+        // Set debounce timer (300ms)
+        state.sensorDebounceTimer = setTimeout(() => {
+          // เก็บสถานะล่าสุดไว้ใน state object
+          state.latestAgvSensorStatus = payload;
+          
+          // ✅ ส่งข้อมูล sensor เฉพาะตอนที่เปลี่ยนแปลงผ่าน WebSocket
+          broadcastToClients('sensor_update', payload);
+          console.log('📡 Sensor data changed (debounced), broadcasted to', clients.size, 'clients');
+          
+          // Clear timer reference
+          state.sensorDebounceTimer = null;
+        }, 300); // 300ms debounce delay
+      }
+    } catch (err) {
+      console.error('❌ Failed to parse AGV sensor MQTT payload:', err.message);
+    }
+  }
   // 🔽 Logic สำหรับ Lift Status
   if (topic === "automation/station1/lift/status") {
     try {
@@ -892,15 +1409,28 @@ app.get('/api/task-monitor', async (req, res) => {
   }
 });
 
-// ✅ GET Task History (เฉพาะงานที่จบสำเร็จ)
+// ✅ แก้ไข API ให้กรองตาม Station
 app.get('/api/task/history', async (req, res) => {
   try {
-    const result = await pool.query(`
+    const station = req.query.station; // รับ station parameter
+    
+    let query = `
       SELECT tray_id, action_type, floor, slot, station_id, status, created_at, completed_at, username
       FROM task_monitor
       WHERE status = 'success'
-      ORDER BY completed_at DESC
-    `);
+    `;
+    
+    let params = [];
+    
+    // ถ้ามี station parameter ให้กรองตาม station
+    if (station) {
+      query += ` AND station_id = $1`;
+      params.push(parseInt(station));
+    }
+    
+    query += ` ORDER BY completed_at DESC`;
+    
+    const result = await pool.query(query, params);
     res.json(result.rows);
   } catch (err) {
     console.error("❌ Fetch task history error:", err.message);
@@ -1316,6 +1846,20 @@ app.post('/api/workstation/dispose', async (req, res) => {
 // ✅ เก็บกล้องที่ register เข้ามา
 let cameras = {};
 
+// ✅ Auto-register cameras on server start
+function initializeCameras() {
+  // Register default cameras
+  const defaultCameras = [
+    { camera_id: 'CAM001', ip: '127.0.0.1' },
+    { camera_id: 'CAM002', ip: '127.0.0.1' }
+  ];
+  
+  defaultCameras.forEach(({ camera_id, ip }) => {
+    cameras[camera_id] = { ip, registered_at: new Date() };
+    console.log(`📸 Auto-registered Camera: ${camera_id} → ${ip}`);
+  });
+}
+
 // ✅ รับ register กล้อง
 app.post('/api/camera/register', (req, res) => {
   const { camera_id, ip } = req.body;
@@ -1326,6 +1870,14 @@ app.post('/api/camera/register', (req, res) => {
   cameras[camera_id] = { ip, registered_at: new Date() };
   console.log(`📸 Camera Registered: ${camera_id} → ${ip}`);
   res.json({ message: "Camera registered" });
+});
+
+// ✅ ดูรายการกล้องที่ register ไว้
+app.get('/api/camera/list', (req, res) => {
+  res.json({
+    cameras: cameras,
+    total: Object.keys(cameras).length
+  });
 });
 
 // ✅ ดึง stream กล้อง → stream pass-through แบบ raw 100%
@@ -1385,9 +1937,17 @@ app.get('/api/camera/stream/:camera_id', (req, res) => {
   });
 
   socket.on('error', (err) => {
-    console.error('❌ Stream socket error:', err);
-    if (!res.headersSent) res.status(500).send('Proxy failed');
-    else res.end();
+    console.error(`❌ Camera ${camera_id} connection error:`, err.message);
+    if (!res.headersSent) {
+      res.status(500).json({ 
+        error: 'Camera connection failed', 
+        camera_id: camera_id,
+        target_url: targetUrl,
+        message: err.message
+      });
+    } else {
+      res.end();
+    }
   });
 
   // ✅ กรณี client กดปิด tab ให้ terminate socket ทันที
@@ -1470,4 +2030,676 @@ app.get('/api/overview/summary-cards', async (req, res) => {
 });
 
 
+app.get('/api/overview/summary-cards', async (req, res) => {
+  try {
+    const station = parseInt(req.query.station) || 1;
+    const today = new Date().toISOString().split('T')[0];
+    const yesterday = new Date(Date.now() - 86400000).toISOString().split('T')[0];
+    
+    // ข้อมูลวันนี้
+    const todayResult = await pool.query(`
+      SELECT 
+        SUM(CASE WHEN action_type = 'inbound' THEN 1 ELSE 0 END) as inbound,
+        SUM(CASE WHEN action_type = 'outbound' THEN 1 ELSE 0 END) as outbound
+      FROM tray_history 
+      WHERE station_id = $1 AND DATE(created_at) = $2
+    `, [station, today]);
+    
+    // ข้อมูลเมื่อวาน
+    const yesterdayResult = await pool.query(`
+      SELECT 
+        SUM(CASE WHEN action_type = 'inbound' THEN 1 ELSE 0 END) as inbound,
+        SUM(CASE WHEN action_type = 'outbound' THEN 1 ELSE 0 END) as outbound
+      FROM tray_history 
+      WHERE station_id = $1 AND DATE(created_at) = $2
+    `, [station, yesterday]);
 
+    // จำนวนถาดในคลัง
+    const trayResult = await pool.query(`
+      SELECT COUNT(*) as total FROM tray_inventory WHERE station_id = $1
+    `, [station]);
+
+    // งานที่สำเร็จวันนี้
+    const taskResult = await pool.query(`
+      SELECT 
+        SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as success,
+        COUNT(*) as total
+      FROM task_monitor 
+      WHERE station_id = $1 AND DATE(created_at) = $2
+    `, [station, today]);
+
+    const today_inbound = parseInt(todayResult.rows[0].inbound) || 0;
+    const today_outbound = parseInt(todayResult.rows[0].outbound) || 0;
+    const yesterday_inbound = parseInt(yesterdayResult.rows[0].inbound) || 0;
+    const yesterday_outbound = parseInt(yesterdayResult.rows[0].outbound) || 0;
+    const total_trays = parseInt(trayResult.rows[0].total) || 0;
+    
+    // คำนวณเปอร์เซ็นต์งานสำเร็จ
+    const total_tasks = parseInt(taskResult.rows[0].total) || 0;
+    const success_tasks = parseInt(taskResult.rows[0].success) || 0;
+    const ontime_percentage = total_tasks > 0 ? Math.round((success_tasks / total_tasks) * 100) : 100;
+
+    // คำนวณ trend
+    const calculateTrend = (today, yesterday) => {
+      if (yesterday === 0) return today > 0 ? 100 : 0;
+      return Math.round(((today - yesterday) / yesterday) * 100);
+    };
+
+    res.json({
+      today_inbound,
+      today_outbound,
+      total_trays,
+      ontime_percentage,
+      inbound_trend: calculateTrend(today_inbound, yesterday_inbound),
+      outbound_trend: calculateTrend(today_outbound, yesterday_outbound),
+      trays_trend: 0, // คำนวณถ้าต้องการ
+      ontime_trend: 0 // คำนวณถ้าต้องการ
+    });
+
+  } catch (err) {
+    console.error('Overview API Error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+// USER MANAGEMENT APIs (เพิ่มใหม่ทั้งหมด)
+
+
+// ✅ [GET] ดึงข้อมูลผู้ใช้ทั้งหมด
+app.get('/api/users', async (req, res) => {
+    try {
+       const result = await pool.query(`
+    SELECT id, username, role, created_at,
+           (last_seen > NOW() - INTERVAL '2 minutes') as is_online
+    FROM users ORDER BY id ASC
+`);
+        res.json(result.rows);
+    } catch (err) {
+        console.error('❌ Error fetching users:', err.message);
+        res.status(500).json({ error: 'Server error' });
+    }
+});
+
+// ✅ [GET] ดึงข้อมูลผู้ใช้คนเดียว (สำหรับหน้าแก้ไข)
+app.get('/api/users/:id', async (req, res) => {
+    const { id } = req.params;
+    try {
+        const result = await pool.query(
+            'SELECT id, username, role FROM users WHERE id = $1',
+            [id]
+        );
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+        res.json(result.rows[0]);
+    } catch (err) {
+        console.error(`❌ Error fetching user ${id}:`, err.message);
+        res.status(500).json({ error: 'Server error' });
+    }
+});
+
+// ✅ [POST] เพิ่มผู้ใช้ใหม่
+app.post('/api/users', async (req, res) => {
+    const { username, password, role } = req.body;
+
+    if (!username || !password || !role) {
+        return res.status(400).json({ error: 'กรุณากรอกข้อมูลให้ครบถ้วน' });
+    }
+
+    try {
+        const existingUser = await pool.query('SELECT id FROM users WHERE username = $1', [username]);
+        if (existingUser.rows.length > 0) {
+            return res.status(409).json({ error: 'มีชื่อผู้ใช้นี้ในระบบแล้ว' });
+        }
+
+        const hashedPassword = await bcrypt.hash(password, 10);
+        const result = await pool.query(
+            'INSERT INTO users (username, password_hash, role) VALUES ($1, $2, $3) RETURNING id, username, role, created_at',
+            [username, hashedPassword, role]
+        );
+
+        res.status(201).json(result.rows[0]);
+    } catch (err) {
+        console.error('❌ Error creating user:', err.message);
+        res.status(500).json({ error: 'Server error' });
+    }
+});
+
+// ✅ [PUT] แก้ไขข้อมูลผู้ใช้ (Role หรือ Password)
+app.put('/api/users/:id', async (req, res) => {
+    const { id } = req.params;
+    const { role, password } = req.body;
+
+    if (!role && !password) {
+        return res.status(400).json({ error: 'ไม่มีข้อมูลให้อัปเดต' });
+    }
+
+    try {
+        const updates = [];
+        const queryParams = [];
+        let paramIndex = 1;
+
+        // เพิ่ม role เข้าไปใน query ถ้ามีการส่งมา
+        if (role) {
+            updates.push(`role = $${paramIndex++}`);
+            queryParams.push(role);
+        }
+
+        // เพิ่ม password เข้าไปใน query ถ้ามีการส่งมา
+        if (password) {
+            const hashedPassword = await bcrypt.hash(password, 10);
+            updates.push(`password_hash = $${paramIndex++}`);
+            queryParams.push(hashedPassword);
+        }
+
+        queryParams.push(id); // เพิ่ม id เป็นพารามิเตอร์สุดท้ายสำหรับ WHERE
+
+        const query = `
+            UPDATE users 
+            SET ${updates.join(', ')} 
+            WHERE id = $${paramIndex} 
+            RETURNING id, username, role
+        `;
+
+        const result = await pool.query(query, queryParams);
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'ไม่พบผู้ใช้ที่ต้องการแก้ไข' });
+        }
+
+        res.json(result.rows[0]);
+    } catch (err) {
+        console.error(`❌ Error updating user ${id}:`, err.message);
+        res.status(500).json({ error: 'Server error' });
+    }
+});
+
+// ✅ [DELETE] ลบผู้ใช้
+app.delete('/api/users/:id', async (req, res) => {
+    const { id } = req.params;
+    try {
+        const result = await pool.query(
+            'DELETE FROM users WHERE id = $1 RETURNING id',
+            [id]
+        );
+
+        if (result.rowCount === 0) {
+            return res.status(404).json({ error: 'ไม่พบผู้ใช้ที่ต้องการลบ' });
+        }
+        
+        console.log(`🗑️ Deleted user with ID: ${id}`);
+        res.json({ message: 'ลบผู้ใช้สำเร็จ' });
+    } catch (err) {
+        console.error(`❌ Error deleting user ${id}:`, err.message);
+        res.status(500).json({ error: 'Server error' });
+    }
+});
+
+// ✅ [เพิ่มใหม่] API สำหรับ Ping เพื่ออัปเดต last_seen
+app.post('/api/users/ping', async (req, res) => {
+    const { userId } = req.body;
+    if (!userId) {
+        return res.status(400).json({ error: 'Missing userId' });
+    }
+    try {
+        // อัปเดตเวลาล่าสุดของผู้ใช้คนนั้นๆ ให้เป็นเวลาปัจจุบัน
+        await pool.query(
+            'UPDATE users SET last_seen = NOW() WHERE id = $1',
+            [userId]
+        );
+        res.sendStatus(200); // ส่งแค่สถานะ OK กลับไป ไม่ต้องมีข้อมูล
+    } catch (err) {
+        console.error('❌ Ping Error:', err.message);
+        res.sendStatus(500);
+    }
+});
+
+
+// ===============================================
+// ✅ GLOBAL VARIABLES FOR LIGHT CONTROL (IN BACKEND)
+// ===============================================
+let lightSchedules = {}; // Stores loaded schedules from database (Backend's cache)
+let currentLightState = {}; // Stores current state of lights (intensity, isManuallyOverridden) in Backend
+
+// ✅ MQTT Command Queue for Backend Publishing
+const mqttCommandQueue = [];
+let isProcessingMqttQueue = false;
+
+// Funct// ✅ ฟังก์ชันจัดการคิวที่แก้ไขแล้ว (เพิ่ม Delay เป็น 500ms)
+async function processMqttQueue() {
+    if (mqttCommandQueue.length === 0) {
+        isProcessingMqttQueue = false;
+        return;
+    }
+
+    isProcessingMqttQueue = true;
+    const command = mqttCommandQueue.shift(); // ดึงคำสั่งแรกออกจากคิว
+
+    try {
+        mqttClient.publish(command.topic, command.payload);
+        console.log(`📤 MQTT Publish >> ${command.topic}`, command.payload);
+    } catch (error) {
+        console.error('❌ MQTT Publish Error:', error.message);
+    }
+
+    // --- 💡 [จุดที่แก้ไข] เพิ่มเวลาหน่วงเป็น 500ms ---
+    // เพื่อให้ ESP32 และไดรเวอร์ Modbus มีเวลาประมวลผลมากขึ้น
+    await delay(3000); 
+    
+    processMqttQueue(); // เรียกตัวเองเพื่อทำงานกับคำสั่งถัดไปในคิว
+}
+
+
+// ✅ [ULTIMATE & PROVEN MAPPING] - แก้ไขตามผลการทดสอบจริง
+function getLightParams(floor, type) {
+    const floorNum = parseInt(floor);
+
+    const settings = {
+        // ✅ ชั้น 1 (ยืนยันแล้ว)
+        FLOOR_1_SETTINGS: { 
+            'light-white': { layer: 1, dir: 7 },
+            'light-red':   { layer: 1, dir: 5 }, // 👈 แก้ไข dir ของไฟแดง
+            'fan':         { layer: 1, dir: 101 } 
+        },
+        // ✅ ชั้น 2
+        FLOOR_2_SETTINGS: { 
+            'light-white': { layer: 2, dir: 7 }, 
+            'light-red':   { layer: 2, dir: 5 }, // 👈 แก้ไข dir ของไฟแดง
+            'fan':         { layer: 1, dir: 103 } 
+        },
+        // ✅ ชั้น 3
+        FLOOR_3_SETTINGS: { 
+            'light-white': { layer: 1, dir: 3 }, 
+            'light-red':   { layer: 1, dir: 1 }, // 👈 แก้ไข dir ของไฟแดง
+            'fan':         { layer: 2, dir: 101 } 
+        },
+        // ✅ ชั้น 4
+        FLOOR_4_SETTINGS: { 
+            'light-white': { layer: 3, dir: 7 }, 
+            'light-red':   { layer: 3, dir: 5 }, // 👈 แก้ไข dir ของไฟแดง
+            'fan':         { layer: 3, dir: 101 } 
+        },
+        // ✅ ชั้น 5
+        FLOOR_5_SETTINGS: { 
+            'light-white': { layer: 3, dir: 3 }, 
+            'light-red':   { layer: 3, dir: 1 }, // 👈 แก้ไข dir ของไฟแดง
+            'fan':         { layer: 3, dir: 103 } 
+        }
+    };
+
+    const mapping = {
+        1: settings.FLOOR_1_SETTINGS,
+        2: settings.FLOOR_2_SETTINGS,
+        3: settings.FLOOR_3_SETTINGS,
+        4: settings.FLOOR_4_SETTINGS,
+        5: settings.FLOOR_5_SETTINGS,
+    };
+
+    return mapping[floorNum] ? mapping[floorNum][type] : null;
+}
+// 2. Function to send MQTT commands (uses queue)
+function sendLightCommandToHardware(layer, dir, distance) {
+    const topic = "LED"; // This topic should match what ESP32 subscribes to
+    const payload = JSON.stringify({
+        Key: "Apple",
+        command: "DIM", 
+        layer: layer,
+        dir: dir,
+        distance: parseInt(distance)
+    });
+
+    mqttCommandQueue.push({ topic, payload });
+    if (!isProcessingMqttQueue) {
+        processMqttQueue(); // Start processing the queue if not already running
+    }
+}
+
+// 3. Function to check if current time is within schedule (Thailand Time - GMT+7)
+function isTimeWithin(onTimeStr, offTimeStr) {
+    if (!onTimeStr || !offTimeStr) return false;
+
+    const now = new Date();
+    // Adjust to Thailand Time (GMT+7)
+    const utc = now.getTime() + (now.getTimezoneOffset() * 60000);
+    const thTime = new Date(utc + (3600000 * 7)); // 3600000 ms = 1 hour
+
+    const [onHours, onMinutes] = onTimeStr.split(':').map(Number);
+    const onDate = new Date(thTime.getFullYear(), thTime.getMonth(), thTime.getDate(), onHours, onMinutes, 0);
+
+    const [offHours, offMinutes] = offTimeStr.split(':').map(Number);
+    const offDate = new Date(thTime.getFullYear(), thTime.getMonth(), thTime.getDate(), offHours, offMinutes, 0);
+
+    // Handle overnight schedules (e.g., 23:00 - 02:00)
+    if (offDate <= onDate) {
+        if (thTime < onDate) { // Current time is before 'on' time today (schedule started yesterday)
+            onDate.setDate(onDate.getDate() - 1);
+        } else { // Current time is after 'on' time today (schedule ends tomorrow)
+            offDate.setDate(offDate.getDate() + 1);
+        }
+    }
+    return thTime >= onDate && thTime < offDate;
+}
+
+
+
+// 4. Main Scheduler Logic (Backend) - ฉบับแก้ไข
+function startAutomaticLightScheduler() {
+    console.log("⏰ Light Scheduler Initialized in Backend (v2 - Corrected Override Logic).");
+    const schedulerInterval = setInterval(async () => {
+        try {
+            // ❌ ไม่มีการเรียก await loadSchedulesFromDB(); ในนี้แล้ว
+
+            for (let floor = 1; floor <= 5; floor++) {
+                ['light-white', 'light-red', 'fan'].forEach(type => {
+                    const key = `${floor}-${type}`;
+                    const schedule = lightSchedules[key];
+                    
+                    if (!currentLightState[key]) {
+                        currentLightState[key] = { intensity: 0, isManuallyOverridden: false };
+                    }
+                    const state = currentLightState[key];
+                    const params = getLightParams(floor, type);
+                    if (!params) return;
+
+                    const shouldBeOnBySchedule = schedule && schedule.enabled && isTimeWithin(schedule.on, schedule.off);
+
+                    if (state.isManuallyOverridden) {
+                        // เมื่อถูก Manual Override, Scheduler จะไม่ยุ่งเกี่ยวเลย
+                    } 
+                    else if (shouldBeOnBySchedule) {
+                        // ไม่ถูก Override และตารางบอกว่า "ควรเปิด"
+                        if (state.intensity !== schedule.intensity) {
+                            console.log(`⏰ ACTION: Turning ON ${key} to ${schedule.intensity}% (ตามตาราง)`);
+                            sendLightCommandToHardware(params.layer, params.dir, schedule.intensity);
+                            state.intensity = schedule.intensity;
+                        }
+                    } 
+                    else {
+                        // ไม่ถูก Override และตารางบอกว่า "ควรปิด"
+                        if (state.intensity > 0) {
+                            console.log(`⏰ ACTION: Turning OFF ${key} (สิ้นสุดตาราง/ไม่มีตาราง)`);
+                            sendLightCommandToHardware(params.layer, params.dir, 0);
+                            state.intensity = 0;
+                        }
+                    }
+                });
+            }
+        } catch (err) {
+            console.error("❌ Scheduler Error:", err);
+        }
+    }, 5000); // ตรวจสอบทุก 5 วินาที
+}
+
+// 5. Function to load schedules from database (Backend)
+async function loadSchedulesFromDB() {
+    try {
+        const { rows } = await pool.query('SELECT * FROM light_schedules ORDER BY floor, type');
+        const newSchedules = {};
+        rows.forEach(row => {
+            const key = `${row.floor}-${row.type}`;
+            newSchedules[key] = {
+                intensity: row.intensity,
+                on: row.on_time,
+                off: row.off_time,
+                enabled: row.enabled,
+            };
+        });
+        lightSchedules = newSchedules; // Update backend's cache of schedules
+        console.log(`✅ Loaded ${rows.length} light schedules from database.`);
+    } catch (err) {
+        console.error('❌ Failed to load light schedules from database:', err);
+    }
+}
+
+// ===============================================
+// ✅ LIGHT CONTROL API Endpoints (Backend)
+// ===============================================
+app.post('/api/lights/schedule', async (req, res) => {
+    const { floor, type, intensity, onTime, offTime, enabled } = req.body;
+    try {
+        const query = `
+            INSERT INTO light_schedules (floor, type, intensity, on_time, off_time, enabled, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, NOW())
+            ON CONFLICT (floor, type) DO UPDATE SET
+                intensity = EXCLUDED.intensity,
+                on_time = EXCLUDED.on_time,
+                off_time = EXCLUDED.off_time,
+                enabled = EXCLUDED.enabled,
+                updated_at = NOW()
+            RETURNING *;
+        `;
+        const { rows } = await pool.query(query, [floor, type, parseInt(intensity), onTime, offTime, enabled]);
+
+        const key = `${rows[0].floor}-${rows[0].type}`;
+        if (currentLightState[key]) {
+            currentLightState[key].isManuallyOverridden = false;
+            console.log(`🔄 Reset Manual Override for ${key}.`);
+        }
+
+        await loadSchedulesFromDB(); // ✅ เพิ่มบรรทัดนี้เข้ามา เพื่อโหลดข้อมูลใหม่ทันที
+
+        console.log('✅ DB Updated:', rows[0].floor, rows[0].type);
+        res.json({ message: 'บันทึกตารางเวลาสำเร็จ', schedule: rows[0] });
+        
+    } catch (err) {
+        console.error('❌ Error saving schedule to DB:', err);
+        res.status(500).json({ error: 'เกิดข้อผิดพลาดในการบันทึกข้อมูล' });
+    }
+});
+
+// GET /api/lights/schedule - Fetch all schedules (โค้ดเดิมถูกต้องแล้ว)
+app.get('/api/lights/schedule', async (req, res) => {
+    try {
+        const { rows } = await pool.query('SELECT * FROM light_schedules ORDER BY floor, type');
+        const formattedSchedules = {};
+        rows.forEach(row => {
+            const key = `${row.floor}-${row.type}`;
+            formattedSchedules[key] = {
+                intensity: row.intensity,
+                on: row.on_time,
+                off: row.off_time,
+                enabled: row.enabled,
+            };
+        });
+        res.json(formattedSchedules);
+    } catch (err) {
+        console.error('❌ Error fetching schedules from DB:', err);
+        res.status(500).json({ error: 'เกิดข้อผิดพลาดในการดึงข้อมูล' });
+    }
+});
+
+// DELETE /api/lights/schedule/all - Clear all schedules (โค้ดเดิมถูกต้องแล้ว)
+app.delete('/api/lights/schedule/all', async (req, res) => {
+    try {
+        // First, turn off all lights controlled by schedule
+        for (let floor = 1; floor <= 5; floor++) { // Loop all 5 floors
+            ['light-white', 'light-red', 'fan'].forEach(type => {
+                const params = getLightParams(floor, type);
+                if (params) {
+                    sendLightCommandToHardware(params.layer, params.dir, 0); // Send DIM 0
+                }
+            });
+        }
+        
+        // Then, truncate the database table
+        await pool.query('TRUNCATE TABLE light_schedules RESTART IDENTITY;');
+        
+        // Reset Backend's cache and state variables
+        lightSchedules = {};
+        currentLightState = {}; // All lights are now off and not manually overridden
+        
+        console.log('🗑️ All light schedules cleared from DB and Backend cache. Lights commanded OFF.');
+        res.json({ message: 'ล้างข้อมูลการตั้งเวลาทั้งหมดสำเร็จ' });
+        
+    } catch (err) {
+        console.error('❌ Error clearing all schedules:', err);
+        res.status(500).json({ error: 'เกิดข้อผิดพลาดในการล้างข้อมูล' });
+    }
+});
+
+// --- API for real-time light control (Manual commands from Frontend) ---
+// ✅ โค้ดใหม่ที่แก้ไขแล้ว
+app.post('/api/lights/control', async (req, res) => {
+    const { floor, type, distance } = req.body;
+    const id = `${floor}-${type}`;
+
+    if (!currentLightState[id]) {
+        currentLightState[id] = { intensity: 0, isManuallyOverridden: false };
+    }
+    currentLightState[id].intensity = parseInt(distance);
+    currentLightState[id].isManuallyOverridden = parseInt(distance) !== 0;
+
+    // 🟢 ไม่มีการเรียก sendLightCommandToHardware จากตรงนี้แล้ว
+
+    res.json({ message: "รับค่าเรียบร้อย" });
+});
+// POST /api/lights/off/all - Force turn off all lights (global button)
+app.post('/api/lights/off/all', async (req, res) => {
+    console.log('🚨 FORCE SHUTDOWN: Received command to turn off all lights from Frontend.');
+
+    for (let floor = 1; floor <= 5; floor++) { // วนลูป 5 ชั้น
+        ['light-white', 'light-red', 'fan'].forEach(type => {
+            const key = `${floor}-${type}`;
+            const params = getLightParams(floor, type); // ดึงค่า layer, dir ที่ถูกต้อง
+
+            if (params) {
+                // --- ✨ [จุดที่แก้ไข] เพิ่มการเรียกใช้ฟังก์ชันนี้เพื่อส่งคำสั่งปิดจริงๆ ---
+                sendLightCommandToHardware(params.layer, params.dir, 0); 
+
+                // อัปเดตสถานะใน Backend (ส่วนนี้ถูกต้องอยู่แล้ว)
+                if (!currentLightState[key]) {
+                    currentLightState[key] = { intensity: 0, isManuallyOverridden: false };
+                }
+                currentLightState[key].intensity = 0;
+                currentLightState[key].isManuallyOverridden = true; 
+            }
+        });
+    }
+    res.json({ message: 'ส่งคำสั่งปิดไฟทั้งหมดเรียบร้อย' });
+});
+// ✅ [NEW & STABLE] Endpoint สำหรับรับข้อมูล Schedule ทั้งหมดในครั้งเดียว
+app.post('/api/lights/schedule/batch', async (req, res) => {
+    const schedules = req.body; // รับ Array ของ schedules ทั้งหมด
+    const client = await pool.connect(); // เชื่อมต่อ Database
+
+    try {
+        await client.query('BEGIN'); //  TRANSACTION START
+
+        for (const schedule of schedules) {
+            const { floor, type, intensity, onTime, offTime, enabled } = schedule;
+            const query = `
+                INSERT INTO light_schedules (floor, type, intensity, on_time, off_time, enabled, updated_at)
+                VALUES ($1, $2, $3, $4, $5, $6, NOW())
+                ON CONFLICT (floor, type) DO UPDATE SET
+                    intensity = EXCLUDED.intensity,
+                    on_time = EXCLUDED.on_time,
+                    off_time = EXCLUDED.off_time,
+                    enabled = EXCLUDED.enabled,
+                    updated_at = NOW();
+            `;
+            await client.query(query, [floor, type, intensity, onTime, offTime, enabled]);
+
+            // รีเซ็ตสถานะ Manual Override เมื่อมีการบันทึก Schedule
+            const key = `${floor}-${type}`;
+            if (currentLightState[key]) {
+                currentLightState[key].isManuallyOverridden = false;
+            }
+        }
+
+        await client.query('COMMIT'); // TRANSACTION END (SAVE)
+        console.log(`✅ Batch updated ${schedules.length} schedules successfully.`);
+
+        await loadSchedulesFromDB(); // โหลดข้อมูลใหม่ทั้งหมดเข้าหน่วยความจำ **เพียงครั้งเดียว**
+
+        res.json({ message: 'บันทึกตารางเวลาทั้งหมดสำเร็จ' });
+
+    } catch (err) {
+        await client.query('ROLLBACK'); // TRANSACTION END (CANCEL)
+        console.error('❌ Error in batch schedule update:', err);
+        res.status(500).json({ error: 'เกิดข้อผิดพลาดในการบันทึกข้อมูล' });
+    } finally {
+        client.release(); // คืนการเชื่อมต่อให้ Pool
+    }
+});
+
+// NEW API: GET /api/lights/status - Frontend polls this to get current light states
+app.get('/api/lights/status', (req, res) => {
+    res.json(currentLightState); // Send the Backend's current state to Frontend
+});
+
+// ===============================================
+// ✅ INITIALIZE SCHEDULER & LOAD DATA (ON SERVER START)
+// ===============================================
+// Load schedules from DB once when server starts
+loadSchedulesFromDB(); 
+// Start the scheduler loop in the backend
+startAutomaticLightScheduler();
+
+
+
+
+// API สำหรับบันทึกค่าที่เปลี่ยนแปลง (Pending) ลง DB
+app.post('/api/lights/pending', async (req, res) => {
+    const { userId, floor, type, intensity } = req.body;
+    try {
+        // ใช้ "UPSERT" logic: ถ้ามีข้อมูลเดิมอยู่แล้วให้อัปเดต, ถ้าไม่มีให้เพิ่มใหม่
+        const query = `
+            INSERT INTO light_pending_changes (user_id, floor, type, intensity)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (user_id, floor, type) DO UPDATE SET
+                intensity = EXCLUDED.intensity,
+                created_at = NOW();
+        `;
+        await pool.query(query, [userId, floor, type, intensity]);
+        res.status(200).json({ message: 'Pending change saved.' });
+    } catch (err) {
+        console.error('❌ Error saving pending change:', err);
+        res.status(500).json({ error: 'Server error' });
+    }
+});
+
+// API สำหรับดึงค่าที่ค้างอยู่ทั้งหมดของผู้ใช้
+app.get('/api/lights/pending', async (req, res) => {
+    const { userId } = req.query;
+    try {
+        const { rows } = await pool.query(
+            'SELECT floor, type, intensity FROM light_pending_changes WHERE user_id = $1',
+            [userId]
+        );
+        res.json(rows);
+    } catch (err) {
+        console.error('❌ Error fetching pending changes:', err);
+        res.status(500).json({ error: 'Server error' });
+    }
+});
+
+// API สำหรับลบค่าที่ค้างอยู่ของชั้นนั้นๆ (หลังจากกดยืนยันแล้ว)
+app.delete('/api/lights/pending/:floor', async (req, res) => {
+    const { floor } = req.params;
+    const { userId } = req.body; // รับ userId จาก body เพื่อความปลอดภัย
+    try {
+        await pool.query(
+            'DELETE FROM light_pending_changes WHERE user_id = $1 AND floor = $2',
+            [userId, floor]
+        );
+        res.status(200).json({ message: 'Pending changes cleared for floor.' });
+    } catch (err) {
+        console.error('❌ Error deleting pending changes:', err);
+        res.status(500).json({ error: 'Server error' });
+    }
+});
+
+app.get('/api/sensors', (req, res) => {
+    const stationId = 1; // สมมติว่ามีสถานีเดียว
+    const state = stationStates[stationId];
+    
+    // หากยังไม่ได้รับข้อมูล ให้ส่งค่า default กลับไป
+    const sensorStatus = state?.latestAgvSensorStatus || {
+        tray_sensor: false,
+        pos_sensor_1: false,
+        pos_sensor_2: false
+    };
+    
+    res.json(sensorStatus);
+});
