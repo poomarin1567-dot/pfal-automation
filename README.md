@@ -11,7 +11,7 @@
 ## ภาพหน้าจอระบบ
 
 ### Dashboard หลัก
-![Dashboard](https://via.placeholder.com/800x400/40916c/ffffff?text=Dashboard+Screenshot)
+https://github.com/poomarin1567-dot/pfal-automation?tab=readme-ov-file
 
 ### ระบบจัดการแผนการปลูก
 ![Planting Plan](https://via.placeholder.com/800x400/52b788/ffffff?text=Planting+Plan+Management)
