@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🧪 ทดสอบ Popup ควบคุมรวม</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body class="bg-gray-100 p-8">
+    <div class="max-w-4xl mx-auto">
+        <h1 class="text-3xl font-bold mb-6 text-gray-800">
+            <i class="fas fa-vial text-blue-600 mr-2"></i>
+            ทดสอบ Popup ควบคุมรวม
+        </h1>
+
+        <!-- Test Results -->
+        <div class="bg-white rounded-xl shadow-lg p-6 mb-6">
+            <h2 class="text-xl font-bold mb-4 text-gray-700">
+                <i class="fas fa-clipboard-check text-green-600 mr-2"></i>
+                ผลการทดสอบ
+            </h2>
+            <div id="test-results" class="space-y-2"></div>
+        </div>
+
+        <!-- Manual Tests -->
+        <div class="bg-white rounded-xl shadow-lg p-6">
+            <h2 class="text-xl font-bold mb-4 text-gray-700">
+                <i class="fas fa-hand-pointer text-purple-600 mr-2"></i>
+                ทดสอบด้วยตนเอง
+            </h2>
+
+            <div class="space-y-4">
+                <!-- Test 1 -->
+                <div class="border-2 border-gray-200 rounded-lg p-4">
+                    <h3 class="font-bold text-gray-800 mb-2">
+                        <span class="bg-blue-100 text-blue-800 px-3 py-1 rounded">Test 1</span>
+                        ทดสอบโหมด "ทุกโคม"
+                    </h3>
+                    <ol class="list-decimal list-inside space-y-1 text-sm text-gray-600 ml-4">
+                        <li>เปิดหน้า Light Control</li>
+                        <li>คลิกปุ่ม "ควบคุมรวม - ตั้งค่าครั้งเดียว"</li>
+                        <li>ตรวจสอบว่าปุ่ม "ทุกโคม" เป็นสีม่วง (active)</li>
+                        <li>ดูข้อความสรุปด้านล่าง: ควรแสดง <strong>"ทุกโคม (63 โคม)"</strong></li>
+                        <li>ตั้งค่าไฟขาว: 06:00-18:00, 80%</li>
+                        <li>เปิด Schedule toggle (สีเหลือง)</li>
+                        <li>กดบันทึก → ยืนยัน</li>
+                        <li>ตรวจสอบว่า UI ของทุกโคมอัพเดท</li>
+                    </ol>
+                    <div class="mt-3 flex gap-2">
+                        <button onclick="markTest(1, true)" class="px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600">
+                            <i class="fas fa-check mr-1"></i>ผ่าน
+                        </button>
+                        <button onclick="markTest(1, false)" class="px-4 py-2 bg-red-500 text-white rounded hover:bg-red-600">
+                            <i class="fas fa-times mr-1"></i>ไม่ผ่าน
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Test 2 -->
+                <div class="border-2 border-gray-200 rounded-lg p-4">
+                    <h3 class="font-bold text-gray-800 mb-2">
+                        <span class="bg-blue-100 text-blue-800 px-3 py-1 rounded">Test 2</span>
+                        ทดสอบโหมด "เลือกชั้น"
+                    </h3>
+                    <ol class="list-decimal list-inside space-y-1 text-sm text-gray-600 ml-4">
+                        <li>เปิด Popup ควบคุมรวม</li>
+                        <li>คลิกปุ่ม "เลือกชั้น" (สีน้ำเงิน)</li>
+                        <li>ตรวจสอบว่า section "เลือกชั้นที่ต้องการ" แสดงขึ้นมา</li>
+                        <li>ยกเลิก checkbox ชั้น 4, 5, 6, 7</li>
+                        <li>เหลือเฉพาะชั้น 1, 2, 3 ที่ถูกเลือก</li>
+                        <li>ดูข้อความสรุปด้านล่าง: ควรแสดง <strong>"ชั้น 1, 2, 3 (27 โคม)"</strong></li>
+                        <li>ตั้งค่าพัดลม: 08:00-16:00, 60%</li>
+                        <li>เปิด Schedule toggle พัดลม</li>
+                        <li>กดบันทึก → ยืนยัน</li>
+                        <li>ตรวจสอบว่าเฉพาะชั้น 1-3 มีการอัพเดท</li>
+                        <li>ตรวจสอบว่าชั้น 4-7 ไม่เปลี่ยนแปลง</li>
+                    </ol>
+                    <div class="mt-3 flex gap-2">
+                        <button onclick="markTest(2, true)" class="px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600">
+                            <i class="fas fa-check mr-1"></i>ผ่าน
+                        </button>
+                        <button onclick="markTest(2, false)" class="px-4 py-2 bg-red-500 text-white rounded hover:bg-red-600">
+                            <i class="fas fa-times mr-1"></i>ไม่ผ่าน
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Test 3 -->
+                <div class="border-2 border-gray-200 rounded-lg p-4">
+                    <h3 class="font-bold text-gray-800 mb-2">
+                        <span class="bg-blue-100 text-blue-800 px-3 py-1 rounded">Test 3</span>
+                        ทดสอบโหมด "เลือกโคม"
+                    </h3>
+                    <ol class="list-decimal list-inside space-y-1 text-sm text-gray-600 ml-4">
+                        <li>เปิด Popup ควบคุมรวม</li>
+                        <li>คลิกปุ่ม "เลือกโคม" (สีเขียว)</li>
+                        <li>ตรวจสอบว่า section "เลือกโคมที่ต้องการ" แสดงขึ้นมา</li>
+                        <li>ยกเลิก checkbox ทั้งหมด</li>
+                        <li>เลือกเฉพาะ L1-1, L1-2, L2-1 (3 โคม)</li>
+                        <li>ดูข้อความสรุปด้านล่าง: ควรแสดง <strong>"3 โคมที่เลือก"</strong></li>
+                        <li>ตั้งค่าไฟแดง: 18:00-06:00, 70%</li>
+                        <li>เปิด Schedule toggle ไฟแดง</li>
+                        <li>กดบันทึก → ยืนยัน</li>
+                        <li>ตรวจสอบว่าเฉพาะ 3 โคมที่เลือกมีการอัพเดท</li>
+                        <li>ตรวจสอบว่าโคมอื่นๆ ไม่เปลี่ยนแปลง</li>
+                    </ol>
+                    <div class="mt-3 flex gap-2">
+                        <button onclick="markTest(3, true)" class="px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600">
+                            <i class="fas fa-check mr-1"></i>ผ่าน
+                        </button>
+                        <button onclick="markTest(3, false)" class="px-4 py-2 bg-red-500 text-white rounded hover:bg-red-600">
+                            <i class="fas fa-times mr-1"></i>ไม่ผ่าน
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Test 4 -->
+                <div class="border-2 border-gray-200 rounded-lg p-4">
+                    <h3 class="font-bold text-gray-800 mb-2">
+                        <span class="bg-blue-100 text-blue-800 px-3 py-1 rounded">Test 4</span>
+                        ทดสอบ "เลือกทั้งหมด" ในแต่ละชั้น
+                    </h3>
+                    <ol class="list-decimal list-inside space-y-1 text-sm text-gray-600 ml-4">
+                        <li>เปิด Popup ควบคุมรวม</li>
+                        <li>คลิกปุ่ม "เลือกโคม"</li>
+                        <li>ยกเลิก checkbox ทั้งหมดก่อน</li>
+                        <li>คลิก checkbox "ชั้น 1 - เลือกทั้งหมด"</li>
+                        <li>ตรวจสอบว่าโคม L1-1 ถึง L1-9 ถูกเลือกทั้งหมด</li>
+                        <li>คลิก checkbox "ชั้น 2 - เลือกทั้งหมด"</li>
+                        <li>ตรวจสอบว่าโคม L2-1 ถึง L2-9 ถูกเลือกทั้งหมด</li>
+                        <li>ดูข้อความสรุป: ควรแสดง <strong>"18 โคมที่เลือก"</strong></li>
+                    </ol>
+                    <div class="mt-3 flex gap-2">
+                        <button onclick="markTest(4, true)" class="px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600">
+                            <i class="fas fa-check mr-1"></i>ผ่าน
+                        </button>
+                        <button onclick="markTest(4, false)" class="px-4 py-2 bg-red-500 text-white rounded hover:bg-red-600">
+                            <i class="fas fa-times mr-1"></i>ไม่ผ่าน
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Test 5 -->
+                <div class="border-2 border-gray-200 rounded-lg p-4">
+                    <h3 class="font-bold text-gray-800 mb-2">
+                        <span class="bg-blue-100 text-blue-800 px-3 py-1 rounded">Test 5</span>
+                        ทดสอบตั้งเวลาหลายอุปกรณ์พร้อมกัน
+                    </h3>
+                    <ol class="list-decimal list-inside space-y-1 text-sm text-gray-600 ml-4">
+                        <li>เปิด Popup ควบคุมรวม</li>
+                        <li>เลือกโหมด "ทุกโคม"</li>
+                        <li>ตั้งค่าไฟขาว: 06:00-18:00, 80%, เปิด Schedule</li>
+                        <li>ตั้งค่าไฟแดง: 18:00-06:00, 70%, เปิด Schedule</li>
+                        <li>ตั้งค่าพัดลม: 06:00-18:00, 60%, เปิด Schedule</li>
+                        <li>กดบันทึก</li>
+                        <li>ตรวจสอบ Confirmation Dialog แสดง warning "ไฟขาวปิดและไฟแดงเปิดเวลาเดียวกัน (18:00)"</li>
+                        <li>ยืนยันการบันทึก</li>
+                        <li>ตรวจสอบว่าทุกโคมมีตารางเวลาครบ 3 อุปกรณ์</li>
+                    </ol>
+                    <div class="mt-3 flex gap-2">
+                        <button onclick="markTest(5, true)" class="px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600">
+                            <i class="fas fa-check mr-1"></i>ผ่าน
+                        </button>
+                        <button onclick="markTest(5, false)" class="px-4 py-2 bg-red-500 text-white rounded hover:bg-red-600">
+                            <i class="fas fa-times mr-1"></i>ไม่ผ่าน
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Summary -->
+        <div class="mt-6 bg-gradient-to-r from-purple-50 to-indigo-50 rounded-xl p-6 border-2 border-purple-200">
+            <h2 class="text-xl font-bold mb-3 text-gray-800">
+                <i class="fas fa-chart-pie text-purple-600 mr-2"></i>
+                สรุปผลการทดสอบ
+            </h2>
+            <div id="summary" class="text-lg font-bold text-gray-700">
+                รอการทดสอบ...
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const testResults = {
+            1: null,
+            2: null,
+            3: null,
+            4: null,
+            5: null
+        };
+
+        function markTest(testNumber, passed) {
+            testResults[testNumber] = passed;
+            updateTestResults();
+            updateSummary();
+        }
+
+        function updateTestResults() {
+            const container = document.getElementById('test-results');
+            container.innerHTML = '';
+
+            for (let i = 1; i <= 5; i++) {
+                const result = testResults[i];
+                const div = document.createElement('div');
+                div.className = 'flex items-center gap-3 p-3 rounded-lg ' +
+                    (result === true ? 'bg-green-100 border border-green-300' :
+                     result === false ? 'bg-red-100 border border-red-300' :
+                     'bg-gray-100 border border-gray-300');
+
+                const icon = result === true ? '<i class="fas fa-check-circle text-green-600 text-xl"></i>' :
+                             result === false ? '<i class="fas fa-times-circle text-red-600 text-xl"></i>' :
+                             '<i class="fas fa-clock text-gray-400 text-xl"></i>';
+
+                const text = result === true ? '<span class="font-bold text-green-700">ผ่าน</span>' :
+                             result === false ? '<span class="font-bold text-red-700">ไม่ผ่าน</span>' :
+                             '<span class="text-gray-500">รอการทดสอบ</span>';
+
+                div.innerHTML = `
+                    ${icon}
+                    <span class="font-semibold text-gray-700">Test ${i}:</span>
+                    ${text}
+                `;
+
+                container.appendChild(div);
+            }
+        }
+
+        function updateSummary() {
+            const total = 5;
+            const tested = Object.values(testResults).filter(r => r !== null).length;
+            const passed = Object.values(testResults).filter(r => r === true).length;
+            const failed = Object.values(testResults).filter(r => r === false).length;
+
+            const summary = document.getElementById('summary');
+            summary.innerHTML = `
+                <div class="grid grid-cols-4 gap-4 text-center">
+                    <div>
+                        <div class="text-3xl font-black text-blue-600">${total}</div>
+                        <div class="text-sm text-gray-600">ทดสอบทั้งหมด</div>
+                    </div>
+                    <div>
+                        <div class="text-3xl font-black text-orange-600">${tested}</div>
+                        <div class="text-sm text-gray-600">ทดสอบแล้ว</div>
+                    </div>
+                    <div>
+                        <div class="text-3xl font-black text-green-600">${passed}</div>
+                        <div class="text-sm text-gray-600">ผ่าน</div>
+                    </div>
+                    <div>
+                        <div class="text-3xl font-black text-red-600">${failed}</div>
+                        <div class="text-sm text-gray-600">ไม่ผ่าน</div>
+                    </div>
+                </div>
+                ${tested === total ? `
+                    <div class="mt-4 p-4 rounded-lg ${passed === total ? 'bg-green-100 border-2 border-green-400' : 'bg-orange-100 border-2 border-orange-400'}">
+                        <div class="text-center text-xl font-black ${passed === total ? 'text-green-700' : 'text-orange-700'}">
+                            ${passed === total ?
+                                '<i class="fas fa-trophy mr-2"></i>ผ่านการทดสอบทั้งหมด! 🎉' :
+                                '<i class="fas fa-exclamation-triangle mr-2"></i>มีบางรายการไม่ผ่าน กรุณาตรวจสอบ'}
+                        </div>
+                    </div>
+                ` : ''}
+            `;
+        }
+
+        // Initialize
+        updateTestResults();
+        updateSummary();
+    </script>
+</body>
+</html>

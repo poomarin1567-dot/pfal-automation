@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Debug Light Control UI</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="p-8">
+    <h1 class="text-3xl font-bold mb-4">🔍 Debug Light Control UI</h1>
+
+    <div class="space-y-4">
+        <button onclick="testAPI()" class="bg-blue-500 text-white px-4 py-2 rounded">
+            1. ทดสอบ API /api/lights/status
+        </button>
+
+        <button onclick="testToggle()" class="bg-green-500 text-white px-4 py-2 rounded">
+            2. ทดสอบส่งคำสั่งเปิด/ปิด
+        </button>
+
+        <button onclick="checkLightStates()" class="bg-purple-500 text-white px-4 py-2 rounded">
+            3. ตรวจสอบ lightStates object
+        </button>
+    </div>
+
+    <div id="output" class="mt-8 p-4 bg-gray-100 rounded"></div>
+
+    <script>
+        let lightStates = {};
+
+        async function testAPI() {
+            const output = document.getElementById('output');
+            output.innerHTML = '<div class="text-blue-600">กำลังโหลด...</div>';
+
+            try {
+                const response = await fetch('/api/lights/status');
+                const data = await response.json();
+
+                output.innerHTML = `
+                    <h3 class="font-bold text-lg mb-2">✅ API Response:</h3>
+                    <pre class="bg-white p-4 rounded overflow-auto max-h-96">${JSON.stringify(data, null, 2)}</pre>
+                    <p class="mt-2 text-green-600">จำนวนโคม: ${data.length}</p>
+                `;
+
+                // เก็บข้อมูลไว้ใน lightStates
+                data.forEach(light => {
+                    const deviceMap = {};
+                    if (Array.isArray(light.devices)) {
+                        light.devices.forEach(dev => {
+                            deviceMap[dev.device_type] = dev;
+                        });
+                    }
+
+                    lightStates[light.light_id] = {
+                        whiteLight: {
+                            on: deviceMap['whiteLight']?.is_on || false,
+                            brightness: deviceMap['whiteLight']?.intensity || 0
+                        },
+                        redLight: {
+                            on: deviceMap['redLight']?.is_on || false,
+                            brightness: deviceMap['redLight']?.intensity || 0
+                        },
+                        fan: {
+                            on: deviceMap['fan']?.is_on || false,
+                            speed: deviceMap['fan']?.intensity || 0
+                        }
+                    };
+                });
+
+                console.log('lightStates:', lightStates);
+
+            } catch (error) {
+                output.innerHTML = `<div class="text-red-600">❌ Error: ${error.message}</div>`;
+            }
+        }
+
+        async function testToggle() {
+            const output = document.getElementById('output');
+            output.innerHTML = '<div class="text-blue-600">กำลังส่งคำสั่ง...</div>';
+
+            try {
+                const response = await fetch('/api/lights/control', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        lightId: 'L1-1',
+                        deviceType: 'whiteLight',
+                        isOn: true,
+                        intensity: 80,
+                        userId: 1
+                    })
+                });
+
+                const result = await response.json();
+
+                output.innerHTML = `
+                    <h3 class="font-bold text-lg mb-2">✅ Toggle Response:</h3>
+                    <pre class="bg-white p-4 rounded">${JSON.stringify(result, null, 2)}</pre>
+                `;
+
+                // รอ 1 วินาที แล้วโหลดข้อมูลใหม่
+                setTimeout(async () => {
+                    output.innerHTML += '<div class="text-blue-600 mt-4">กำลังโหลดข้อมูลใหม่...</div>';
+
+                    const response2 = await fetch('/api/lights/status');
+                    const data2 = await response2.json();
+                    const l1_1 = data2.find(l => l.light_id === 'L1-1');
+
+                    output.innerHTML += `
+                        <h3 class="font-bold text-lg mb-2 mt-4">📊 ข้อมูลหลังส่งคำสั่ง (L1-1):</h3>
+                        <pre class="bg-white p-4 rounded">${JSON.stringify(l1_1, null, 2)}</pre>
+                    `;
+
+                    const whiteLight = l1_1.devices.find(d => d.device_type === 'whiteLight');
+                    if (whiteLight.is_on) {
+                        output.innerHTML += '<div class="text-green-600 mt-2">✅ whiteLight เปิดอยู่ในฐานข้อมูล</div>';
+                    } else {
+                        output.innerHTML += '<div class="text-red-600 mt-2">❌ whiteLight ยังปิดอยู่ในฐานข้อมูล</div>';
+                    }
+                }, 1000);
+
+            } catch (error) {
+                output.innerHTML = `<div class="text-red-600">❌ Error: ${error.message}</div>`;
+            }
+        }
+
+        function checkLightStates() {
+            const output = document.getElementById('output');
+
+            if (Object.keys(lightStates).length === 0) {
+                output.innerHTML = '<div class="text-red-600">❌ lightStates ว่างเปล่า กรุณากดปุ่ม 1 ก่อน</div>';
+                return;
+            }
+
+            output.innerHTML = `
+                <h3 class="font-bold text-lg mb-2">📦 lightStates Object:</h3>
+                <pre class="bg-white p-4 rounded overflow-auto max-h-96">${JSON.stringify(lightStates, null, 2)}</pre>
+                <p class="mt-2 text-green-600">จำนวนโคมใน lightStates: ${Object.keys(lightStates).length}</p>
+            `;
+        }
+    </script>
+</body>
+</html>

@@ -4,9 +4,23 @@ const bcrypt = require('bcryptjs');
 const pool = require('./db');
 const path = require('path');
 const WebSocket = require('ws');
+const compression = require('compression');
+const { ModbusSlave, LIGHT_CONTROL_CONFIG, getLightRegisterAddress, sendModbusCommand } = require('./light_control_modbus');
 
-const delay = ms => new Promise(resolve => setTimeout(resolve, ms)); 
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 require('dotenv').config();
+
+// ✅ Performance optimization: Enable Node.js optimizations
+if (process.env.NODE_ENV !== 'development') {
+  process.env.NODE_OPTIONS = '--max-old-space-size=4096 --optimize-for-size';
+}
+
+// ✅ Memory management: Periodic garbage collection
+setInterval(() => {
+  if (global.gc && process.memoryUsage().heapUsed > 100 * 1024 * 1024) {
+    global.gc();
+  }
+}, 60000); // Every minute
 
 
 // ✅ Environment Variables Validation
@@ -22,7 +36,7 @@ if (missingVars.length > 0) {
   process.exit(1);
 }
 
-const mqtt = require('mqtt');  
+const mqtt = require('mqtt');
 
 // ✅ เชื่อมต่อกับ MQTT Server
 const mqttClient = mqtt.connect(`mqtt://${process.env.MQTT_HOST}`, {
@@ -30,12 +44,56 @@ const mqttClient = mqtt.connect(`mqtt://${process.env.MQTT_HOST}`, {
   password: process.env.MQTT_PASSWORD
 });
 
+// ✅ Light Control Queue System (เหมือน task queue)
+const lightCommandQueue = [];
+let isProcessingLightQueue = false;
 
+async function processLightQueue() {
+  if (isProcessingLightQueue || lightCommandQueue.length === 0) return;
 
+  isProcessingLightQueue = true;
+
+  while (lightCommandQueue.length > 0) {
+    const command = lightCommandQueue.shift();
+
+    try {
+      // Processing light command
+
+      // แยก floor จาก lightId (L1-1 -> floor=1)
+      const floorMatch = command.lightId.match(/L(\d+)-/);
+      if (!floorMatch) {
+        console.error(`❌ Invalid lightId format: ${command.lightId}`);
+        continue;
+      }
+      const floor = parseInt(floorMatch[1]);
+
+      // ส่งคำสั่ง MQTT ด้วย parameters ที่ถูกต้อง
+      sendModbusCommand(mqttClient, floor, command.lightId, command.deviceType, command.intensity);
+
+      // Light command sent to MQTT
+    } catch (err) {
+      console.error(`❌ Error sending light command:`, err.message);
+    }
+
+    // Delay 0.5 วินาทีก่อนส่งคำสั่งถัดไป (ลดจาก 2 วินาที เพื่อความเร็ว)
+    if (lightCommandQueue.length > 0) {
+      await delay(500);
+    }
+  }
+
+  isProcessingLightQueue = false;
+  // Light queue empty
+}
+
+function addLightCommandToQueue(lightId, deviceType, isOn, intensity) {
+  lightCommandQueue.push({ lightId, deviceType, isOn, intensity });
+  // Added to light queue
+  processLightQueue(); // เริ่มประมวลผล
+}
 
 const app = express();
 
-// ✅ Security headers
+// ✅ Security headersุ
 app.use((req, res, next) => {
   res.header('X-Content-Type-Options', 'nosniff');
   res.header('X-Frame-Options', 'DENY');
@@ -44,14 +102,52 @@ app.use((req, res, next) => {
   next();
 });
 
+// ✅ Performance optimization: Enable compression
+app.use(compression({
+  level: 6,
+  threshold: 1024,
+  filter: (req, res) => {
+    if (req.headers['x-no-compression']) return false;
+    return compression.filter(req, res);
+  }
+}));
+
 app.use(cors());
-app.use(express.json({ limit: '10mb' })); // ✅ Limit payload size
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+app.use(express.json({ limit: '1mb' }));
+app.use(express.urlencoded({ extended: true, limit: '1mb' }));
+
+// Performance optimization middleware
+app.use((req, res, next) => {
+  // Only disable cache for API endpoints, allow caching for static assets
+  if (req.path.startsWith('/api/')) {
+    res.set({
+      'Cache-Control': 'no-cache, no-store, must-revalidate',
+      'Pragma': 'no-cache',
+      'Expires': '0'
+    });
+  } else {
+    // Cache static files for 1 hour
+    res.set({
+      'Cache-Control': 'public, max-age=3600'
+    });
+  }
+  next();
+});
 
 // ✅ Enhanced Rate Limiting (improved security)
 const requestCounts = new Map();
 const RATE_LIMIT_WINDOW = 60000; // 1 minute
-const MAX_REQUESTS = 200; // ลดจาก 1000 เป็น 200 requests per minute
+const MAX_REQUESTS = 500; // เพิ่มเป็น 500 requests per minute
+
+// Clean up old entries every 5 minutes
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, data] of requestCounts.entries()) {
+    if (now > data.resetTime) {
+      requestCounts.delete(ip);
+    }
+  }
+}, 300000);
 
 
 app.use((req, res, next) => {
@@ -82,11 +178,238 @@ app.get('/', (req, res) => {
 });
 
 // ✅ Health Check API
+// ✅ REPORTS API ENDPOINTS
+// GET statistics for reports page
+app.get('/api/reports/statistics', async (req, res) => {
+  try {
+    const { station } = req.query;
+    const stationId = parseInt(station); // แปลงเป็น integer
+    // Fetching statistics
+
+    // Total planted (จาก plant_count ใน planting_plans) - นับเฉพาะที่ไม่ยกเลิก
+    const plantedResult = await pool.query(`
+      SELECT COALESCE(SUM(plant_count), 0) as total
+      FROM planting_plans
+      WHERE station_id = $1 AND status != 'cancelled'
+    `, [stationId]);
+
+    // Total inbound tasks (นับจำนวนถาดที่มีสถานะ active)
+    let totalInbound = 0;
+    try {
+      const inboundResult = await pool.query(`
+        SELECT COUNT(DISTINCT tray_id) as total
+        FROM tray_inventory
+        WHERE station_id = $1 AND status = 'active'
+      `, [stationId]);
+      totalInbound = parseInt(inboundResult.rows[0].total);
+    } catch (err) {
+      console.log('tray_inventory table issue, trying alternative:', err.message);
+      // ลองนับจาก planting_plans แทน
+      try {
+        const altResult = await pool.query(`
+          SELECT COUNT(*) as total
+          FROM planting_plans
+          WHERE station_id = $1 AND status IN ('pending', 'in_progress')
+        `, [stationId]);
+        totalInbound = parseInt(altResult.rows[0].total);
+      } catch {
+        totalInbound = 0;
+      }
+    }
+
+    // Total outbound tasks (จากการเก็บเกี่ยวที่เสร็จแล้ว)
+    const outboundResult = await pool.query(`
+      SELECT COUNT(*) as total
+      FROM planting_plans
+      WHERE station_id = $1 AND actual_harvest_date IS NOT NULL
+    `, [stationId]);
+
+    // Total work orders - ลองหาจากตารางที่มีจริง
+    let totalWorkOrders = 0;
+    try {
+      // ลองจาก work_orders ก่อน
+      const woResult = await pool.query(`
+        SELECT COUNT(*) as total
+        FROM work_orders
+        WHERE station_id = $1
+      `, [stationId]);
+      totalWorkOrders = parseInt(woResult.rows[0].total);
+    } catch (woError) {
+      // ถ้าไม่มีตาราง work_orders ลองจาก work_order_tasks
+      try {
+        const wotResult = await pool.query(`
+          SELECT COUNT(*) as total
+          FROM work_order_tasks
+          WHERE station_id = $1
+        `, [stationId]);
+        totalWorkOrders = parseInt(wotResult.rows[0].total);
+      } catch (wotError) {
+        console.log('No work orders table found, using 0');
+        totalWorkOrders = 0;
+      }
+    }
+
+    const stats = {
+      totalPlanted: parseInt(plantedResult.rows[0].total) || 0,
+      totalInbound: totalInbound,
+      totalOutbound: parseInt(outboundResult.rows[0].total) || 0,
+      totalWorkOrders: totalWorkOrders
+    };
+
+    // Statistics fetched
+    res.json(stats);
+  } catch (error) {
+    console.error('Error fetching reports statistics:', error);
+    res.status(500).json({
+      error: 'Failed to fetch statistics',
+      details: error.message,
+      totalPlanted: 0,
+      totalInbound: 0,
+      totalOutbound: 0,
+      totalWorkOrders: 0
+    });
+  }
+});
+
+// GET planting records
+app.get('/api/reports/planting-records', async (req, res) => {
+  try {
+    const { station, page = 1, limit = 50 } = req.query;
+    const offset = (page - 1) * limit;
+    const stationId = parseInt(station); // แปลงเป็น integer
+
+    // Fetching planting records
+
+    // Query ดึงข้อมูลจริงจากตาราง
+    const result = await pool.query(`
+      SELECT
+        pp.*,
+        u.username
+      FROM planting_plans pp
+      LEFT JOIN users u ON pp.created_by = u.username
+      WHERE pp.station_id = $1
+      ORDER BY pp.created_at DESC
+      LIMIT $2 OFFSET $3
+    `, [stationId, limit, offset]);
+
+    // Count total records
+    const countResult = await pool.query(`
+      SELECT COUNT(*) as total
+      FROM planting_plans
+      WHERE station_id = $1
+    `, [stationId]);
+
+    const total = parseInt(countResult.rows[0].total);
+    // Found records
+
+    // แปลงข้อมูลให้ตรงกับที่ frontend ต้องการ
+    const formattedData = result.rows.map(row => ({
+      planting_date: row.plant_date || row.planting_date || row.created_at,
+      batch_id: row.batch_number || row.batch_id || '',
+      variety_name: row.variety || '',
+      plant_quantity: row.plant_count || row.quantity || 0,
+      target_floor: row.level_required || row.level || row.floor || 1,
+      status: row.status || 'pending',
+      vegetable_type: row.vegetable_type || row.vegetable_name || '',
+      harvest_date: row.harvest_date || null,
+      actual_harvest_date: row.actual_harvest_date || null,
+      username: row.username || 'System',
+      created_at: row.created_at
+    }));
+
+    res.json({
+      data: formattedData,
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total: total,
+        totalPages: Math.ceil(total / limit)
+      }
+    });
+  } catch (error) {
+    console.error('❌ Error fetching planting records:', error.message);
+    console.error('Stack:', error.stack);
+
+    // ส่ง empty response แทน error
+    res.json({
+      data: [],
+      pagination: { page: 1, limit: 50, total: 0, totalPages: 0 }
+    });
+  }
+});
+
+// GET work orders with pagination
+app.get('/api/reports/work-orders', async (req, res) => {
+  try {
+    const { station, page = 1, limit = 50 } = req.query;
+    const offset = (page - 1) * limit;
+    const stationId = parseInt(station);
+
+    // Fetching work orders
+
+    // ดึงข้อมูลจาก planting_plans ที่มี status = 'in_progress'
+    const result = await pool.query(`
+      SELECT
+        pp.id as work_order_id,
+        pp.plan_id as work_order_number,
+        pp.created_at,
+        'planting' as type,
+        pp.batch_number as batch_id,
+        pp.status,
+        0 as progress,
+        pp.vegetable_type as vegetable_name,
+        pp.level_required as target_floor,
+        pp.plant_count,
+        pp.plant_count as actual_count,
+        pp.plant_date as target_date,
+        pp.harvest_date,
+        pp.completed_at,
+        COALESCE(u.username, pp.created_by, 'System') as username,
+        pp.priority,
+        pp.variety
+      FROM planting_plans pp
+      LEFT JOIN users u ON pp.created_by = u.username
+      WHERE pp.station_id = $1 AND pp.status = 'in_progress'
+      ORDER BY pp.created_at DESC
+      LIMIT $2 OFFSET $3
+    `, [stationId, limit, offset]);
+
+    // Count total
+    const countResult = await pool.query(`
+      SELECT COUNT(*) as total
+      FROM planting_plans
+      WHERE station_id = $1 AND status = 'in_progress'
+    `, [stationId]);
+
+    const total = parseInt(countResult.rows[0].total);
+    // Found work orders
+
+    res.json({
+      data: result.rows,
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total: total,
+        totalPages: Math.ceil(total / limit)
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching work orders:', error);
+    console.error('Error details:', error.message);
+    res.status(500).json({
+      error: 'Failed to fetch work orders',
+      details: error.message,
+      data: [],
+      pagination: { page: 1, limit: 50, total: 0, totalPages: 0 }
+    });
+  }
+});
+
 app.get('/api/health', async (req, res) => {
   try {
     const dbCheck = await pool.query('SELECT 1');
     const mqttStatus = mqttClient.connected ? 'connected' : 'disconnected';
-    
+
     res.json({
       status: 'healthy',
       timestamp: new Date().toISOString(),
@@ -123,8 +446,6 @@ async function processLogQueue() {
         INSERT INTO logs (user_id, activity, action_type, category, station, floor, slot, veg_type, description)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
       `, [logData.userId, logData.activity, logData.action_type, logData.category, logData.station, logData.floor, logData.slot, logData.veg_type, logData.description]);
-      
-      console.log("📘 Log saved:", logData.activity);
     } catch (err) {
       console.error("❌ Logging failed:", err.message);
       // ใส่กลับเข้า queue หากล้มเหลว
@@ -160,12 +481,10 @@ app.post('/api/login', async (req, res) => {
   }
 
   try {
-    console.log(`🔍 Looking for user: "${username}"`);
-    const result = await pool.query('SELECT * FROM users WHERE username = $1', [username]);
+    const result = await pool.query('SELECT id, username, password_hash, role FROM users WHERE username = $1', [username]);
     const user = result.rows[0];
 
     if (!user) {
-      console.log(`❌ User "${username}" not found`);
       return res.status(400).json({ error: 'ชื่อผู้ใช้ไม่ถูกต้อง' });
     }
 
@@ -174,8 +493,6 @@ app.post('/api/login', async (req, res) => {
     if (!isMatch) {
       return res.status(400).json({ error: 'รหัสผ่านไม่ถูกต้อง' });
     }
-
-    console.log("✅ Login success for:", user.username);
 
     // อัปเดต last_seen
     await pool.query('UPDATE users SET last_seen = NOW() WHERE id = $1', [user.id]);
@@ -208,7 +525,9 @@ app.post('/api/tray/inbound', async (req, res) => {
   const {
     username, station, floor, slot, veg_type, quantity,
     batch_id, seeding_date, notes, tray_id: existing_tray_id,
-    work_order_id, planting_plan_id 
+    work_order_id, planting_plan_id,
+    // 🌊 รับฟิลด์ระบบน้ำและค่า EC, pH, water_close_date
+    water_system, ec_value, ph_value, water_close_date
   } = req.body;
 
   const created_at = new Date();
@@ -248,11 +567,17 @@ app.post('/api/tray/inbound', async (req, res) => {
       state.seedingDate = seeding_date;
       state.notes = notes;
       state.stationId = stationId;
-      
+
       // 2. ⭐️ [แก้ไข] เพิ่มการส่ง work_order_id และ planting_plan_id เข้าไปใน state
-      state.workOrderId = work_order_id; 
+      state.workOrderId = work_order_id;
       state.plantingPlanId = planting_plan_id;
-      
+
+      // 🌊 เพิ่มฟิลด์ระบบน้ำและค่า EC, pH, water_close_date
+      state.waterSystem = water_system;
+      state.ecValue = ec_value;
+      state.phValue = ph_value;
+      state.waterCloseDate = water_close_date;
+
       state.flowState = 'inbound_start_lift_tray';
       console.log(`[Trigger] 🚀 เริ่ม flow INBOUND (Tray: ${state.trayId}, WO: ${state.workOrderId}) → ชั้น ${floor}, ช่อง ${slot}`);
       handleFlow(stationId);
@@ -275,9 +600,8 @@ async function updateWorkOrdersOnOutbound(trayId, reason, actionType = 'outbound
       LEFT JOIN planting_plans pp ON ti.planting_plan_id = pp.id
       WHERE ti.tray_id = $1 AND pp.status != 'completed'
     `, [trayId]);
-    
+
     if (planResult.rows.length === 0) {
-      console.log(`⚠️ No active planting plan found for tray: ${trayId}`);
       return null;
     }
     
@@ -304,11 +628,9 @@ async function updateWorkOrdersOnOutbound(trayId, reason, actionType = 'outbound
         const newStatus = reason === 'เก็บเกี่ยวทั้งหมด' ? 'completed' : 'in_progress';
         await pool.query(`
           UPDATE work_orders 
-          SET status = $1, updated_at = NOW() 
+          SET status = $1, updated_at = NOW()
           WHERE id = $2
         `, [newStatus, workOrderId]);
-        
-        console.log(`✅ Updated harvest work order ${harvestWO.rows[0].work_order_number} to ${newStatus}`);
         
         // หากเป็นเก็บเกี่ยวทั้งหมด ให้อัปเดต planting plan เป็น completed
         if (reason === 'เก็บเกี่ยวทั้งหมด') {
@@ -336,8 +658,6 @@ async function updateWorkOrdersOnOutbound(trayId, reason, actionType = 'outbound
         SET status = 'cancelled', updated_at = NOW()
         WHERE planting_plan_id = $1 AND status IN ('pending', 'in_progress')
       `, [plantingPlanId]);
-      
-      console.log(`✅ Disposed planting plan: ${planData.plan_id} and cancelled related work orders`);
     }
     
     return workOrderId;
@@ -406,10 +726,7 @@ app.post('/api/tray/outbound', async (req, res) => {
     );
     
     // ✅ Real-time Work Order Update - อัปเดต work orders ทันทีเมื่อมี outbound action
-    const updatedWorkOrderId = await updateWorkOrdersOnOutbound(trayData.tray_id, reason, 'outbound');
-    if (updatedWorkOrderId) {
-      console.log(`✅ Updated work order ID: ${updatedWorkOrderId} for tray: ${trayData.tray_id}`);
-    }
+    await updateWorkOrdersOnOutbound(trayData.tray_id, reason, 'outbound');
     
     const stationId = parseInt(station);
     const state = stationStates[stationId];
@@ -450,10 +767,7 @@ app.post('/api/workstation/complete', async (req, res) => {
             
             // หากเป็น outbound task ให้อัปเดต work orders
             if (actionType === 'outbound' && reason) {
-                const updatedWorkOrderId = await updateWorkOrdersOnOutbound(completedTrayId, reason, actionType);
-                if (updatedWorkOrderId) {
-                    console.log(`✅ [Workstation Complete] Updated work order ID: ${updatedWorkOrderId} for tray: ${completedTrayId}`);
-                }
+                await updateWorkOrdersOnOutbound(completedTrayId, reason, actionType);
             }
             
             // หา work order และ planting plan ที่เกี่ยวข้องกับ tray นี้ (legacy logic)
@@ -503,8 +817,7 @@ async function generateNextTrayId() {
 
     // 3. นำตัวเลขมาจัดรูปแบบให้มี 0 นำหน้าเสมอ (เช่น 1 -> "001", 12 -> "012")
     const formattedId = `T-${String(nextIdNumber).padStart(3, '0')}`;
-    
-    console.log(`✅ Generated New Tray ID: ${formattedId}`);
+
     return formattedId;
 
   } catch (err) {
@@ -550,7 +863,6 @@ app.post('/api/lift/jog', (req, res) => {
 
   try {
     mqttClient.publish(topic, payload);
-    console.log("📤 MQTT Jog >>", topic, payload);
 
     logActivity({
       userId,
@@ -573,7 +885,6 @@ app.post('/api/lift/stop', (req, res) => {
 
   try {
     mqttClient.publish(topic, payload);
-    console.log("📤 MQTT STOP >>", topic);
 
     // ไม่เก็บ log สำหรับ STOP
 
@@ -590,7 +901,6 @@ app.post('/api/lift/emergency', (req, res) => {
 
   try {
     mqttClient.publish(topic, payload);
-    console.log("📤 MQTT EMERGENCY >>", topic);
 
     logActivity({
       userId,
@@ -608,7 +918,7 @@ app.post('/api/lift/emergency', (req, res) => {
 });
 // ✅ REST API ดึงสถานะลิฟต์แบบครบ พร้อม recovery
 app.get('/api/lift/status', async (req, res) => {
-  const station = parseInt(req.query.station) || 1;
+  const station = parseInt(req.query.station);
 
   try {
     const result = await pool.query(
@@ -668,13 +978,304 @@ app.post('/api/agv/move', async (req, res) => {
   }
 });
 
+// ✅ LIGHT CONTROL API ENDPOINTS
+// Get light control status
+app.get('/api/lights/status', async (req, res) => {
+  try {
+    // ดึงข้อมูลจาก Database
+    const result = await pool.query(`
+      SELECT
+        l.light_id,
+        l.floor,
+        l.position,
+        l.name,
+        json_agg(
+          json_build_object(
+            'device_type', d.device_type,
+            'is_on', d.is_on,
+            'intensity', d.intensity,
+            'schedule_enabled', d.schedule_enabled,
+            'schedule_on_time', d.schedule_on_time,
+            'schedule_off_time', d.schedule_off_time
+          )
+        ) as devices
+      FROM light_control_lights l
+      LEFT JOIN light_control_devices d ON l.light_id = d.light_id
+      GROUP BY l.light_id, l.floor, l.position, l.name
+      ORDER BY l.floor, l.position
+    `);
+
+    // คำนวณ is_on แบบ real-time ตามเวลาปัจจุบัน
+    const now = new Date();
+    const currentMinutes = now.getHours() * 60 + now.getMinutes();
+
+    const processedData = result.rows.map(light => {
+      const processedDevices = light.devices.map(device => {
+        // ถ้าเปิดตั้งเวลาอัตโนมัติ → คำนวณตามเวลา
+        if (device.schedule_enabled && device.schedule_on_time && device.schedule_off_time) {
+          const onMinutes = parseInt(device.schedule_on_time.split(':')[0]) * 60 + parseInt(device.schedule_on_time.split(':')[1]);
+          const offMinutes = parseInt(device.schedule_off_time.split(':')[0]) * 60 + parseInt(device.schedule_off_time.split(':')[1]);
+
+          let shouldBeOn = false;
+          if (onMinutes > offMinutes) {
+            // ข้ามวัน
+            shouldBeOn = currentMinutes >= onMinutes || currentMinutes < offMinutes;
+          } else {
+            shouldBeOn = currentMinutes >= onMinutes && currentMinutes < offMinutes;
+          }
+
+          return { ...device, is_on: shouldBeOn };
+        }
+        // ถ้าไม่ได้เปิดตั้งเวลา → ใช้ค่าจาก Database (manual control)
+        return device;
+      });
+
+      return { ...light, devices: processedDevices };
+    });
+
+    res.json(processedData);
+  } catch (err) {
+    console.error("❌ Fetch light status error:", err.message);
+    console.error("❌ Stack trace:", err.stack);
+    res.status(500).json({ error: "ไม่สามารถดึงข้อมูลสถานะไฟได้", details: err.message });
+  }
+});
+
+// Get light schedules
+app.get('/api/lights/schedule', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT
+        d.*,
+        l.name as light_name,
+        l.floor,
+        l.position
+      FROM light_control_devices d
+      JOIN light_control_lights l ON d.light_id = l.light_id
+      WHERE d.schedule_enabled = true
+      ORDER BY l.floor, l.position, d.schedule_on_time
+    `);
+    res.json(result.rows);
+  } catch (err) {
+    console.error("❌ Fetch light schedules error:", err.message);
+    console.error("❌ Stack trace:", err.stack);
+    res.status(500).json({ error: "ไม่สามารถดึงข้อมูลตารางเวลาไฟได้", details: err.message });
+  }
+});
+
+// Update light status (manual control) - ใช้ Queue
+app.post('/api/lights/control', async (req, res) => {
+  const { deviceId, lightId, deviceType, isOn, intensity, userId, scheduleEnabled } = req.body;
+
+  try {
+    // อัพเดทโดยใช้ light_id และ device_type แทน id
+    // ถ้ามี scheduleEnabled ให้อัพเดทด้วย (สำหรับ Manual Control)
+    if (scheduleEnabled !== undefined) {
+      await pool.query(
+        `UPDATE light_control_devices
+         SET is_on = $1, intensity = $2, schedule_enabled = $3, updated_at = NOW()
+         WHERE light_id = $4 AND device_type = $5`,
+        [isOn, intensity, scheduleEnabled, lightId, deviceType]
+      );
+    } else {
+      await pool.query(
+        `UPDATE light_control_devices
+         SET is_on = $1, intensity = $2, updated_at = NOW()
+         WHERE light_id = $3 AND device_type = $4`,
+        [isOn, intensity, lightId, deviceType]
+      );
+    }
+
+    // ส่งคำสั่งผ่าน Queue (ไม่ส่งตรง)
+    addLightCommandToQueue(lightId, deviceType, isOn, intensity);
+
+    // ส่ง WebSocket update ให้ UI
+    broadcastToClients('light_update', {
+      lightId,
+      deviceType,
+      isOn,
+      intensity
+    });
+
+    // Log activity
+    await logActivity({
+      userId,
+      activity: `${isOn ? 'เปิด' : 'ปิด'}${deviceType} ID: ${lightId} ความเข้ม ${intensity}%`,
+      action_type: 'light',
+      category: 'Light Control'
+    });
+
+    res.json({ success: true, message: "เพิ่มคำสั่งเข้า Queue แล้ว" });
+  } catch (err) {
+    console.error("❌ Light control error:", err.message);
+    res.status(500).json({ error: "ไม่สามารถควบคุมไฟได้" });
+  }
+});
+
+// Save light schedule (single)
+app.post('/api/lights/schedule', async (req, res) => {
+  const { deviceId, scheduleEnabled, scheduleOnTime, scheduleOffTime, userId } = req.body;
+
+  try {
+    await pool.query(
+      `UPDATE light_control_devices
+       SET schedule_enabled = $1,
+           schedule_on_time = $2,
+           schedule_off_time = $3,
+           updated_at = NOW()
+       WHERE id = $4`,
+      [scheduleEnabled, scheduleOnTime, scheduleOffTime, deviceId]
+    );
+
+    await logActivity({
+      userId,
+      activity: `ตั้งเวลาไฟ Device ID: ${deviceId} ${scheduleOnTime} - ${scheduleOffTime}`,
+      action_type: 'light',
+      category: 'Light Schedule'
+    });
+
+    res.json({ success: true, message: "บันทึกตารางเวลาสำเร็จ" });
+  } catch (err) {
+    console.error("❌ Save schedule error:", err.message);
+    res.status(500).json({ error: "ไม่สามารถบันทึกตารางเวลาได้" });
+  }
+});
+
+// Save light schedules in batch (189 schedules with MQTT rate limiting)
+app.post('/api/lights/schedule/batch', async (req, res) => {
+  const schedules = req.body;
+
+  if (!Array.isArray(schedules)) {
+    return res.status(400).json({ error: "Invalid data format" });
+  }
+
+  // Processing batch schedule update
+
+  const client = await pool.connect();
+
+  try {
+    // เริ่ม Transaction
+    await client.query('BEGIN');
+
+    let successCount = 0;
+    let errorCount = 0;
+    const commandsToQueue = []; // เก็บคำสั่งไว้ส่งหลัง commit สำเร็จ
+
+    // ประมวลผลทีละรายการเพื่อป้องกัน MQTT ล้น (แต่ยังเร็วพอ)
+    for (let i = 0; i < schedules.length; i++) {
+      const schedule = schedules[i];
+      const { floor, fixture, type, enabled, onTime, offTime, intensity } = schedule;
+      const lightId = `L${floor}-${fixture}`;
+
+      // Map type to device_type
+      const deviceTypeMap = {
+        'light-white': 'whiteLight',
+        'light-red': 'redLight',
+        'fan': 'fan'
+      };
+      const deviceType = deviceTypeMap[type];
+
+      // คำนวณว่าควรเปิดหรือปิดตามเวลาปัจจุบัน
+      let shouldBeOn = false;
+      if (enabled) {
+        const now = new Date();
+        const currentMinutes = now.getHours() * 60 + now.getMinutes();
+        const onMinutes = parseInt(onTime.split(':')[0]) * 60 + parseInt(onTime.split(':')[1]);
+        const offMinutes = parseInt(offTime.split(':')[0]) * 60 + parseInt(offTime.split(':')[1]);
+
+        if (onMinutes > offMinutes) {
+          // ข้ามวัน
+          shouldBeOn = currentMinutes >= onMinutes || currentMinutes < offMinutes;
+        } else {
+          shouldBeOn = currentMinutes >= onMinutes && currentMinutes < offMinutes;
+        }
+
+        // Schedule calculation
+      }
+
+      // อัปเดตฐานข้อมูล (เพิ่ม is_on ตามเวลาปัจจุบัน)
+      await client.query(
+        `UPDATE light_control_devices
+         SET schedule_enabled = $1,
+             schedule_on_time = $2,
+             schedule_off_time = $3,
+             intensity = $4,
+             is_on = $5,
+             updated_at = NOW()
+         WHERE light_id = $6 AND device_type = $7`,
+        [enabled, onTime, offTime, intensity, shouldBeOn, lightId, deviceType]
+      );
+
+      // เก็บคำสั่งไว้ส่งทีหลัง (หลัง COMMIT สำเร็จ)
+      // ✅ ส่งคำสั่งทั้ง enabled และ disabled (ปิดอุปกรณ์ที่ไม่ติ๊ก)
+      if (enabled) {
+        commandsToQueue.push({
+          lightId,
+          deviceType,
+          isOn: shouldBeOn,
+          intensity: shouldBeOn ? intensity : 0
+        });
+      } else {
+        // ถ้าไม่ได้ติ๊ก → ส่งคำสั่งปิดอุปกรณ์
+        commandsToQueue.push({
+          lightId,
+          deviceType,
+          isOn: false,
+          intensity: 0
+        });
+      }
+
+      successCount++;
+
+      // แสดง progress ทุก 20 รายการ
+      if ((i + 1) % 20 === 0) {
+        // Batch progress
+      }
+    }
+
+    // ถ้าทุกอย่างสำเร็จ ให้ COMMIT
+    await client.query('COMMIT');
+    // Transaction committed
+
+    // ส่งคำสั่งเข้า Queue หลัง COMMIT สำเร็จ
+    commandsToQueue.forEach(cmd => {
+      addLightCommandToQueue(cmd.lightId, cmd.deviceType, cmd.isOn, cmd.intensity);
+    });
+    // Added commands to MQTT queue
+
+    // Log activity (ใช้ userId = 1 ถ้าไม่มี)
+    const userId = schedules[0]?.userId || 1;
+    await logActivity({
+      userId: Number(userId),
+      activity: `ตั้งเวลาอุปกรณ์แบบ Batch (${successCount}/${schedules.length} รายการ)`,
+      action_type: 'light',
+      category: 'Light Schedule Batch'
+    });
+
+    res.json({
+      success: true,
+      message: `บันทึกตารางเวลาสำเร็จ ${successCount} รายการ`,
+      successCount,
+      errorCount: 0,
+      queuedCommands: commandsToQueue.length
+    });
+  } catch (err) {
+    // ถ้ามีข้อผิดพลาด ให้ ROLLBACK
+    await client.query('ROLLBACK');
+    console.error("❌ Batch schedule error - ROLLED BACK:", err.message);
+    res.status(500).json({ error: "ไม่สามารถบันทึกตารางเวลาแบบ batch ได้ (ยกเลิกทั้งหมด)" });
+  } finally {
+    client.release();
+  }
+});
+
 // ✅ GET LOGS
 app.get('/api/logs', async (req, res) => {
   try {
     const result = await pool.query(`
-      SELECT logs.*, users.username 
-      FROM logs 
-      LEFT JOIN users ON logs.user_id = users.id 
+      SELECT logs.*, users.username
+      FROM logs
+      LEFT JOIN users ON logs.user_id = users.id
       ORDER BY logs.timestamp DESC
     `);
     res.json(result.rows);
@@ -698,18 +1299,19 @@ app.post('/api/mqtt-command', async (req, res) => {
     let mqttTopic, mqttMessage;
 
     if (type === 'home') {
-      // Home system: {"Key":"1097BD225248","Profile":"1","Device":"Open"}
+      // Home system: {"Key":"142B2FC933E0","Profile":"1.5","Volume":"30","Device":"Open"}
       mqttTopic = 'water/home';
       mqttMessage = JSON.stringify({
-        Key: "142B2FC933E0", // <--- แก้ไขตรงนี้
+        Key: "142B2FC933E0",
         Profile: payload.Profile,
+        Volume: payload.Volume,
         Device: payload.Device
       });
     } else if (type === 'layer') {
       // Layer system: {"Key":"1097BD225248","Device":"1","Status":"Open"}
       mqttTopic = 'water/layer';
       mqttMessage = JSON.stringify({
-       Key: "142B2FC933E0", // <--- แก้ไขตรงนี้
+       Key: "ECE334469544", // <--- แก้ไขตรงนี้
         Device: payload.Device,
         Status: payload.Status
       });
@@ -717,7 +1319,7 @@ app.post('/api/mqtt-command', async (req, res) => {
       // Valve system: {"Key":"1097BD225248","Device":"1","Status":"Open"}
       mqttTopic = 'water/valve';
       mqttMessage = JSON.stringify({
-        Key: "1097BD225248",
+        Key: "ECE334469544",
         Device: payload.Device,
         Status: payload.Status
       });
@@ -726,9 +1328,6 @@ app.post('/api/mqtt-command', async (req, res) => {
     }
 
     // Publish to MQTT
-    console.log(`📡 Publishing to MQTT topic: ${mqttTopic}`);
-    console.log(`📡 Message: ${mqttMessage}`);
-    
     mqttClient.publish(mqttTopic, mqttMessage, { qos: 1 }, (err) => {
       if (err) {
         console.error('❌ MQTT Publish Error:', err);
@@ -738,8 +1337,7 @@ app.post('/api/mqtt-command', async (req, res) => {
           details: err.message 
         });
       }
-      
-      console.log('✅ MQTT message published successfully');
+
       res.json({ 
         success: true, 
         message: 'Water command sent successfully',
@@ -758,7 +1356,7 @@ app.post('/api/mqtt-command', async (req, res) => {
   }
 });
 
-// ✅✅✅ [ โค้ดที่ถูกต้อง 100% ] คัดลอกไปวางทับฟังก์ชันเดิมได้เลย ✅✅✅
+
 
 mqttClient.on('message', async (topic, message) => { // 👈 เพิ่ม async ตรงนี้
   const messageStr = message.toString().trim();
@@ -783,7 +1381,7 @@ mqttClient.on('message', async (topic, message) => { // 👈 เพิ่ม asy
       data = { raw: messageStr }; // เก็บข้อความดิบไว้ถ้า parse ไม่ได้
     }
 
-    // ✨✨✨ [ ส่วนที่เพิ่มเข้ามาใหม่ทั้งหมด ] ✨✨✨
+  
     // ตรวจสอบว่านี่คือข้อความตอบกลับจาก ESP32 ที่ทำงานเสร็จแล้วหรือไม่
     if (data.Result === 'Success' && data.Device && data.Status) {
         
@@ -808,7 +1406,7 @@ mqttClient.on('message', async (topic, message) => { // 👈 เพิ่ม asy
             console.error(`❌ [Water] Device ${deviceId} update failed:`, dbError.message);
         }
     }
-    // ✨✨✨ [ สิ้นสุดส่วนที่เพิ่มเข้ามาใหม่ ] ✨✨✨
+ 
 
 
     // ส่วนการส่งข้อมูลไปหน้าเว็บยังทำงานเหมือนเดิม
@@ -834,12 +1432,126 @@ mqttClient.on('message', async (topic, message) => { // 👈 เพิ่ม asy
 
 // ✅ START SERVER with WebSocket
 const PORT = process.env.PORT || 3000;
-const server = app.listen(PORT, '0.0.0.0', async () => {
+// ✅ Performance optimization: HTTP server settings
+const server = require('http').createServer(app);
+server.keepAliveTimeout = 5000;
+server.headersTimeout = 6000;
+server.timeout = 30000;
+
+// ✅ ระบบตรวจสอบตารางเวลาอัตโนมัติ (Auto Schedule Checker)
+async function checkLightSchedules() {
+  try {
+    const now = new Date();
+    const currentTime = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+
+    // Checking schedules
+
+    // ดึงข้อมูล schedules ที่เปิดใช้งาน
+    const result = await pool.query(`
+      SELECT
+        d.id,
+        d.light_id,
+        d.device_type,
+        d.is_on,
+        d.intensity,
+        d.schedule_on_time,
+        d.schedule_off_time,
+        l.floor,
+        l.position,
+        l.name
+      FROM light_control_devices d
+      JOIN light_control_lights l ON d.light_id = l.light_id
+      WHERE d.schedule_enabled = true
+    `);
+
+    if (!result || !result.rows) {
+      console.error('❌ Failed to fetch schedule data');
+      return;
+    }
+
+    // Found devices with schedule enabled
+
+    let onCount = 0;
+    let offCount = 0;
+
+    for (const device of result.rows) {
+      // คำนวณว่าควรเปิดหรือปิดตามช่วงเวลา
+      const currentMinutes = now.getHours() * 60 + now.getMinutes();
+      const onMinutes = parseInt(device.schedule_on_time.split(':')[0]) * 60 + parseInt(device.schedule_on_time.split(':')[1]);
+      const offMinutes = parseInt(device.schedule_off_time.split(':')[0]) * 60 + parseInt(device.schedule_off_time.split(':')[1]);
+
+      let shouldBeOn;
+      if (onMinutes > offMinutes) {
+        // ข้ามวัน (เช่น 18:00 - 06:00)
+        shouldBeOn = currentMinutes >= onMinutes || currentMinutes < offMinutes;
+      } else {
+        // ปกติ (เช่น 06:00 - 18:00)
+        shouldBeOn = currentMinutes >= onMinutes && currentMinutes < offMinutes;
+      }
+
+      // ถ้าควรเปิด แต่ตอนนี้ปิดอยู่
+      if (shouldBeOn && !device.is_on) {
+        // Auto ON
+
+        // อัปเดตฐานข้อมูล
+        await pool.query(
+          `UPDATE light_control_devices SET is_on = true, updated_at = NOW() WHERE id = $1`,
+          [device.id]
+        );
+
+        // ส่งคำสั่งผ่าน Queue
+        addLightCommandToQueue(device.light_id, device.device_type, true, device.intensity);
+        onCount++;
+
+        // ส่ง WebSocket update
+        broadcastToClients('light_update', {
+          lightId: device.light_id,
+          deviceType: device.device_type,
+          isOn: true,
+          intensity: device.intensity
+        });
+      }
+
+      // ถ้าควรปิด แต่ตอนนี้เปิดอยู่
+      if (!shouldBeOn && device.is_on) {
+        // Auto OFF
+
+        // อัปเดตฐานข้อมูล
+        await pool.query(
+          `UPDATE light_control_devices SET is_on = false, updated_at = NOW() WHERE id = $1`,
+          [device.id]
+        );
+
+        // ส่งคำสั่งผ่าน Queue
+        addLightCommandToQueue(device.light_id, device.device_type, false, 0);
+        offCount++;
+
+        // ส่ง WebSocket update
+        broadcastToClients('light_update', {
+          lightId: device.light_id,
+          deviceType: device.device_type,
+          isOn: false,
+          intensity: 0
+        });
+      }
+    }
+
+    if (onCount > 0 || offCount > 0) {
+      // Schedule check complete
+    }
+  } catch (err) {
+    console.error('❌ Error checking light schedules:', err.message);
+    console.error('❌ Stack trace:', err.stack);
+  }
+}
+
+server.listen(PORT, '0.0.0.0', async () => {
   console.log(`🚀 Server is running at http://0.0.0.0:${PORT}`);
-  
-  
-  // ✅ Initialize cameras on server start
-  initializeCameras();
+  console.log(`📊 Memory usage: ${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)} MB`);
+
+  // ✅ เริ่มระบบตรวจสอบตารางเวลาอัตโนมัติ (ทุก 1 นาที)
+  setInterval(checkLightSchedules, 60000);
+  console.log('⏰ Light schedule checker started (every 1 minute)');
 });
 
 // ✅ WebSocket Server for real-time updates
@@ -848,8 +1560,7 @@ const clients = new Set();
 
 wss.on('connection', (ws) => {
   clients.add(ws);
-  console.log('🔗 New WebSocket client connected. Total clients:', clients.size);
-  
+
   // ✅ Heartbeat to detect dead connections
   ws.isAlive = true;
   ws.on('pong', () => {
@@ -869,6 +1580,8 @@ wss.on('connection', (ws) => {
 
 // ✅ Cleanup dead connections every 30 seconds
 const heartbeatInterval = setInterval(() => {
+  if (wss.clients.size === 0) return; // Skip if no clients
+  
   wss.clients.forEach((ws) => {
     if (!ws.isAlive) {
       clients.delete(ws);
@@ -877,7 +1590,7 @@ const heartbeatInterval = setInterval(() => {
     ws.isAlive = false;
     ws.ping();
   });
-}, 30000);
+}, 60000); // เพิ่มจาก 30 เป็น 60 วินาที
 
 // ✅ Graceful shutdown
 const activeTimers = [heartbeatInterval];
@@ -968,8 +1681,6 @@ app.post('/api/log', async (req, res) => {
     description
   } = req.body;
 
-  console.log("📥 Logging from Frontend:", req.body);
-
   if (!username || !activity || !category || !action_type) {
     return res.status(400).json({ error: 'ข้อมูลไม่ครบ' });
   }
@@ -986,11 +1697,11 @@ app.post('/api/log', async (req, res) => {
 
     const userId = userResult.rows[0].id;
 
-    // ✅ ป้องกัน "" ส่งเข้าฐานข้อมูล (จะ error)
-    const parsedStation = station === "" ? null : station;
-    const parsedFloor = floor === "" ? null : parseInt(floor);
-    const parsedSlot = slot === "" ? null : parseInt(slot);
-    const parsedVegType = veg_type === "" ? null : veg_type;
+    // ✅ ป้องกัน "" ส่งเข้าฐานข้อมูล (จะ error) และป้องกัน NaN
+    const parsedStation = station === "" || station === null || station === undefined ? null : station;
+    const parsedFloor = floor === "" || floor === null || floor === undefined || isNaN(parseInt(floor)) ? null : parseInt(floor);
+    const parsedSlot = slot === "" || slot === null || slot === undefined || isNaN(parseInt(slot)) ? null : parseInt(slot);
+    const parsedVegType = veg_type === "" || veg_type === null || veg_type === undefined ? null : veg_type;
 
     // ✅ ถ้าไม่ได้ส่ง description มาเลย ใช้ activity แทน
     const parsedDescription = (!description || description === "") ? activity : description;
@@ -1010,7 +1721,7 @@ app.post('/api/log', async (req, res) => {
 });
 
 app.get('/api/tray-inventory', async (req, res) => {
-  const stationId = req.query.station || '1'; 
+  const stationId = req.query.station; 
   try {
     // ✅ JOIN กับ planting_plans และคำนวณอายุถาดในหน่วยชั่วโมงและวัน
     const result = await pool.query(`
@@ -1038,36 +1749,50 @@ app.get('/api/tray-inventory', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-// ในไฟล์ index.js (เพิ่ม API นี้เข้าไป)
+
 
 // ✅ [เพิ่มใหม่] API สำหรับดึงถาดที่กำลังปลูก (แก้ปัญหาข้อมูลซ้ำซ้อน)
 app.get('/api/tray-inventory/planting-progress', async (req, res) => {
   try {
+    const { station } = req.query;
     // ✨✨✨ [จุดสำคัญ] ✨✨✨
-    // แก้ไข SQL Query ให้ JOIN จาก tray_inventory ไปยัง planting_plans โดยตรง
-    // เพื่อป้องกันการแสดงผลซ้ำซ้อนจาก work_orders หลายใบ
-    const result = await pool.query(`
-      SELECT 
+    // JOIN จาก tray_inventory ไปยัง planting_plans เพื่อหลีกเลี่ยงข้อมูลซ้ำจาก work_orders
+    // และรองรับการกรองตามสถานี (station_id) หากมีการระบุมา
+
+    let baseQuery = `
+      SELECT
         ti.*, -- เลือกข้อมูลทั้งหมดจาก tray_inventory
         pp.plan_id,
         pp.vegetable_type as plan_vegetable_type,
         pp.plant_date,
         pp.priority,
         pp.notes as plan_notes,
-        pp.status as plan_status
-      FROM 
+        pp.status as plan_status,
+        pp.water_system,
+        pp.ec_value,
+        pp.ph_value,
+        pp.water_close_date as plan_water_close_date
+      FROM
         tray_inventory ti
-      LEFT JOIN 
+      LEFT JOIN
         planting_plans pp ON ti.planting_plan_id = pp.id
-      WHERE 
-        ti.status = 'on_shelf' 
-      ORDER BY 
-        ti.harvest_date ASC, ti.time_in DESC
-    `);
-    
-    console.log(`📊 พบถาดที่กำลังปลูก (In-Progress): ${result.rows.length} รายการ`);
+      WHERE
+        ti.status = 'on_shelf'
+    `;
+
+    const params = [];
+    if (station) {
+      baseQuery += ` AND ti.station_id = $1`;
+      params.push(parseInt(station));
+    }
+
+    baseQuery += ` ORDER BY ti.harvest_date ASC, ti.time_in DESC`;
+
+    const result = await pool.query(baseQuery, params);
+
+    // Found in-progress trays
     res.json(result.rows);
-    
+
   } catch (err) {
     console.error('Error fetching planting progress trays:', err.message);
     res.status(500).json({ error: 'Server error while fetching planting progress' });
@@ -1126,8 +1851,7 @@ app.get('/api/tray-history', async (req, res) => {
       LEFT JOIN planting_plans pp ON ti.planting_plan_id = pp.id
       ORDER BY ti.updated_at DESC, ti.time_in DESC
     `);
-    
-    console.log(`📄 ส่งออกประวัติ Tray Master: ${result.rows.length} รายการ`);
+
     res.json(result.rows);
     
   } catch (err) {
@@ -1155,8 +1879,7 @@ app.get('/api/tasks/history', async (req, res) => {
       FROM task_monitor
       ORDER BY created_at DESC
     `);
-    
-    console.log(`📄 ดึงข้อมูล Task History: ${result.rows.length} รายการ`);
+
     res.json(result.rows);
     
   } catch (err) {
@@ -1183,8 +1906,7 @@ app.get('/api/user-logs', async (req, res) => {
       ORDER BY timestamp DESC
       LIMIT 1000
     `);
-    
-    console.log(`📄 ดึงข้อมูล User Logs: ${result.rows.length} รายการ`);
+
     res.json(result.rows);
     
   } catch (err) {
@@ -1205,16 +1927,10 @@ async function loadTrayInventory() {
       trayInventory[key] = tray;
     });
 
-    // Debug ข้อมูลที่ได้จาก API
-    console.log("🔍 โหลดข้อมูลถาด:", data.length, "รายการ");
-
     // เพิ่มการตรวจสอบว่า DOM พร้อมหรือไม่
     const grid = document.querySelector(".tray-grid");
     if (grid) {
       renderTrayGrid(); // เรียกเมื่อ DOM พร้อม
-      console.log("✅ โหลดข้อมูลถาดสำเร็จ", data.length, "รายการ");
-    } else {
-      console.log("⚠️ DOM ยังไม่พร้อม - จะโหลดใหม่เมื่อเปลี่ยนหน้า");
     }
   } catch (err) {
     console.error("❌ โหลด tray inventory ล้มเหลว", err);
@@ -1285,10 +2001,10 @@ app.get('/api/stats/summary', async (req, res) => {
   }
 });
 
-// ✅ Overview API สำหรับหน้า overview
+//  Overview API สำหรับหน้า overview
 app.get('/api/overview', async (req, res) => {
   try {
-    const station = parseInt(req.query.station) || 1;
+    const station = parseInt(req.query.station);
     
     // รวมข้อมูลทั้งหมดที่ overview ต้องการ
     const [summaryRes, weeklyRes] = await Promise.all([
@@ -1324,11 +2040,11 @@ app.get('/api/overview', async (req, res) => {
   }
 });
 
-// ✅ Summary Cards API
-// ✅ [แก้ไข] API สำหรับ Summary Cards ในหน้า Overview
+//  Summary Cards API
+//   API สำหรับ Summary Cards ในหน้า Overview
 app.get('/api/overview/summary-cards', async (req, res) => {
   try {
-    const stationId = req.query.station || '1';
+    const stationId = req.query.station;
 
     // 1. Inbound/Outbound วันนี้ (ส่วนนี้ถูกต้องแล้ว)
     const todayStatsRes = await pool.query(
@@ -1340,7 +2056,7 @@ app.get('/api/overview/summary-cards', async (req, res) => {
       [stationId]
     );
 
-    // 2. ✅✅✅ [ส่วนที่แก้ไข] จำนวนถาดในคลังทั้งหมดจากตาราง tray_inventory ✅✅✅
+    // 2.จำนวนถาดในคลังทั้งหมดจากตาราง tray_inventory ✅✅✅
     const totalTraysRes = await pool.query(
       `SELECT COUNT(*) FROM tray_inventory WHERE station_id = $1 AND status = 'on_shelf'`,
       [stationId]
@@ -1386,7 +2102,7 @@ app.get('/api/stats/weekly', async (req, res) => {
   }
 });
 
-// ✅ API สำหรับดึงข้อมูลตามชั่วโมง (24 ชั่วโมงย้อนหลัง)
+//  API สำหรับดึงข้อมูลตามชั่วโมง (24 ชั่วโมงย้อนหลัง)
 app.get('/api/stats/hourly', async (req, res) => {
   try {
     const station = parseInt(req.query.station);
@@ -1421,7 +2137,7 @@ app.get('/api/stats/hourly', async (req, res) => {
   }
 });
 
-// ✅ [เพิ่มใหม่] API สำหรับดึงข้อมูลกราฟย้อนหลัง 30 วัน
+//  API สำหรับดึงข้อมูลกราฟย้อนหลัง 30 วัน
 app.get('/api/stats/monthly', async (req, res) => {
   try {
     const station = parseInt(req.query.station);
@@ -1445,11 +2161,11 @@ app.get('/api/stats/monthly', async (req, res) => {
   }
 });
 
-// [index.js] - ค้นหาฟังก์ชัน initializeTables แล้วนำโค้ดนี้ไปวางทับของเดิมทั้งหมด
+//  - ค้นหาฟังก์ชัน initializeTables แล้วนำโค้ดนี้ไปวางทับของเดิมทั้งหมด
 
 const initializeTables = async () => {
   try {
-    // ✅ ตาราง planting_plans - เก็บข้อมูลแผนการปลูกจากภายนอก
+    // ตาราง planting_plans - เก็บข้อมูลแผนการปลูกจากภายนอก
     await pool.query(`
       CREATE TABLE IF NOT EXISTS planting_plans (
         id SERIAL PRIMARY KEY,
@@ -1473,7 +2189,7 @@ const initializeTables = async () => {
       )
     `);
 
-    // ✅ ตาราง work_orders - ใบงานที่สร้างจากแผนการปลูก
+    //  ตาราง work_orders - ใบงานที่สร้างจากแผนการปลูก
     await pool.query(`
       CREATE TABLE IF NOT EXISTS work_orders (
         id SERIAL PRIMARY KEY,
@@ -1496,7 +2212,7 @@ const initializeTables = async () => {
       )
     `);
 
-    // ✅ ตาราง work_order_tasks - รายละเอียดงานย่อย
+    //  ตาราง work_order_tasks - รายละเอียดงานย่อย
     await pool.query(`
       CREATE TABLE IF NOT EXISTS work_order_tasks (
         id SERIAL PRIMARY KEY,
@@ -1512,8 +2228,6 @@ const initializeTables = async () => {
         created_at TIMESTAMP DEFAULT NOW()
       )
     `);
-
-    console.log('✅ Database tables initialized successfully');
   } catch (err) {
     console.error('❌ Error initializing tables:', err.message);
   }
@@ -1523,64 +2237,71 @@ const initializeTables = async () => {
 // เรียกใช้ฟังก์ชันสร้างตาราง
 initializeTables();
 
-// ✅ API endpoint สำหรับรับข้อมูลแผนการปลูกจากภายนอก
+//  API endpoint สำหรับรับข้อมูลแผนการปลูกจากภายนอก
 app.post('/api/planting-plan', async (req, res) => {
   try {
-    // ✅ รับข้อมูลครบถ้วนจากภายนอก
-    const { 
-      vegetable_name, 
-      level, 
-      planting_date, 
-      harvest_date, 
-      plant_count, 
-      variety, 
-      batch_number, 
-      source_system, 
+    //  รับข้อมูลครบถ้วนจากภายนอก
+    const {
+      vegetable_name,
+      level,
+      planting_date,
+      harvest_date,
+      plant_count,
+      variety,
+      batch_number,
+      source_system,
       external_plan_id,
-      // ✅ เพิ่มข้อมูลที่อาจขาดหาย
+      //  เพิ่มข้อมูลที่อาจขาดหาย
       priority = 'normal',
       notes = '',
-      created_by = 'external_system'
+      created_by = 'external_system',
+      //  🌊 เพิ่มฟิลด์ใหม่: ระบบน้ำและค่า EC, pH
+      water_system,
+      ec_value,
+      ph_value
     } = req.body;
     
-    // ✅ Validate ข้อมูลที่จำเป็น
+    //  Validate ข้อมูลที่จำเป็น
     if (!vegetable_name || !level || !planting_date || !harvest_date || !plant_count) {
       return res.status(400).json({ 
         error: 'Missing required fields: vegetable_name, level, planting_date, harvest_date, plant_count' 
       });
     }
 
-    // ✅ บันทึกข้อมูลแผนการปลูกพร้อมข้อมูลเพิ่มเติม
+    // บันทึกข้อมูลแผนการปลูกพร้อมข้อมูลเพิ่มเติม
     const planResult = await pool.query(`
       INSERT INTO planting_plans (
-        external_plan_id, vegetable_type, level_required, plant_date, harvest_date, 
-        plant_count, variety, batch_number, source_system, status, notes, created_by
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'received', $10, $11)
+        external_plan_id, vegetable_type, level_required, plant_date, harvest_date,
+        plant_count, variety, batch_number, source_system, status, notes, created_by,
+        water_system, ec_value, ph_value
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'received', $10, $11, $12, $13, $14)
       RETURNING *
-    `, [external_plan_id, vegetable_name, level, planting_date, harvest_date, plant_count, variety || '', batch_number || '', source_system || 'external', notes, created_by]);
+    `, [external_plan_id, vegetable_name, level, planting_date, harvest_date, plant_count, variety || '', batch_number || '', source_system || 'external', notes, created_by, water_system, ec_value, ph_value]);
 
     const plan = planResult.rows[0];
 
-    // ✅ สร้างใบงานอัตโนมัติ
+    //  สร้างใบงานอัตโนมัติ
     const workOrderNumber = `WO-${Date.now()}-${plan.id}`;
     
     // สร้างใบงานปลูก
     const plantingOrder = await pool.query(`
       INSERT INTO work_orders (
-        planting_plan_id, work_order_number, task_type, vegetable_name, 
-        level, target_date, plant_count, priority, status
-      ) VALUES ($1, $2, 'planting', $3, $4, $5, $6, 'high', 'pending')
+        planting_plan_id, work_order_number, task_type, vegetable_name,
+        level, target_date, plant_count, priority, status,
+        water_system, ec_value, ph_value
+      ) VALUES ($1, $2, 'planting', $3, $4, $5, $6, 'high', 'pending', $7, $8, $9)
       RETURNING *
-    `, [plan.id, `${workOrderNumber}-PLANT`, vegetable_name, level, planting_date, plant_count]);
+    `, [plan.id, `${workOrderNumber}-PLANT`, vegetable_name, level, planting_date, plant_count, water_system, ec_value, ph_value]);
 
     // สร้างใบงานเก็บเกี่ยว
     const harvestOrder = await pool.query(`
       INSERT INTO work_orders (
-        planting_plan_id, work_order_number, task_type, vegetable_name, 
-        level, target_date, plant_count, priority, status
-      ) VALUES ($1, $2, 'harvest', $3, $4, $5, $6, 'normal', 'pending')
+        planting_plan_id, work_order_number, task_type, vegetable_name,
+        level, target_date, plant_count, priority, status,
+        water_system, ec_value, ph_value
+      ) VALUES ($1, $2, 'harvest', $3, $4, $5, $6, 'normal', 'pending', $7, $8, $9)
       RETURNING *
-    `, [plan.id, `${workOrderNumber}-HARVEST`, vegetable_name, level, harvest_date, plant_count]);
+    `, [plan.id, `${workOrderNumber}-HARVEST`, vegetable_name, level, harvest_date, plant_count, water_system, ec_value, ph_value]);
 
     console.log(`✅ Created planting plan and work orders for ${vegetable_name} on level ${level}`);
     
@@ -1597,45 +2318,56 @@ app.post('/api/planting-plan', async (req, res) => {
   }
 });
 
-// ✅✅✅ [FINAL & TESTED VERSION] API ดึงรายการแผนการปลูก ✅✅✅
+//  [FINAL & TESTED VERSION] API ดึงรายการแผนการปลูก 
 app.get('/api/planting-plans', async (req, res) => {
   try {
-    const { status, vegetable_type, limit = 50 } = req.query;
-    
+    const { status, vegetable_type, limit = 50, station } = req.query;
+
     let baseQuery = `
-      SELECT 
-        id, plan_id, vegetable_type, plant_date, harvest_date, actual_harvest_date,
-        plant_count, level_required, priority, status, notes, harvest_notes,
-        created_by, completed_by, completed_at,
-        created_at, updated_at, batch_number, variety
-      FROM planting_plans
+      SELECT
+        pp.id, pp.plan_id, pp.vegetable_type, pp.plant_date, pp.harvest_date, pp.actual_harvest_date,
+        pp.plant_count, pp.level_required, pp.priority, pp.status, pp.notes, pp.harvest_notes,
+        pp.created_by, pp.completed_by, pp.completed_at,
+        pp.created_at, pp.updated_at, pp.batch_number, pp.variety, pp.station_id,
+        pp.water_system, pp.ec_value, pp.ph_value, pp.water_close_date
+      FROM planting_plans pp
     `;
-    
+
     const params = [];
     let finalQuery = '';
 
     // ⭐️ [จุดแก้ไขสำคัญ] แยกตรรกะการกรองให้ชัดเจนและตรงไปตรงมา
     let whereConditions = [];
-    
+
+    if (station) {
+      whereConditions.push(`pp.station_id = $${params.length + 1}`);
+      params.push(parseInt(station));
+    }
+
     if (status && status.trim() !== '') {
-      whereConditions.push(`status = $${params.length + 1}`);
+      whereConditions.push(`pp.status = $${params.length + 1}`);
       params.push(status.trim());
     }
-    
+
     if (vegetable_type && vegetable_type.trim() !== '') {
-      whereConditions.push(`vegetable_type = $${params.length + 1}`);
+      whereConditions.push(`pp.vegetable_type = $${params.length + 1}`);
       params.push(vegetable_type.trim());
     }
-    
+
     if (whereConditions.length > 0) {
-      finalQuery = `${baseQuery} WHERE ${whereConditions.join(' AND ')} ORDER BY created_at DESC LIMIT $${params.length + 1}`;
+      finalQuery = `${baseQuery} WHERE ${whereConditions.join(' AND ')} ORDER BY pp.created_at DESC LIMIT $${params.length + 1}`;
     } else {
-      finalQuery = `${baseQuery} ORDER BY created_at DESC LIMIT $${params.length + 1}`;
+      finalQuery = `${baseQuery} ORDER BY pp.created_at DESC LIMIT $${params.length + 1}`;
     }
     params.push(parseInt(limit));
-    
+
+    console.log('🔍 Query:', finalQuery);
+    console.log('🔍 Params:', params);
+
     const result = await pool.query(finalQuery, params);
-    
+
+    console.log(`✅ Found ${result.rows.length} planting plans`);
+
     res.json({
       success: true,
       planting_plans: result.rows,
@@ -1644,8 +2376,9 @@ app.get('/api/planting-plans', async (req, res) => {
 
   } catch (err) {
     console.error('❌ Error in /api/planting-plans:', err.message);
-    res.status(500).json({ 
-      success: false, 
+    console.error('❌ Stack:', err.stack);
+    res.status(500).json({
+      success: false,
       error: 'Server error while fetching planting plans.'
     });
   }
@@ -1666,7 +2399,7 @@ app.post('/api/sync-civic-data', async (req, res) => {
 
     for (const planData of plans) {
       try {
-        // ✅ [แก้ไข] เปลี่ยน vegetable_type เป็น vegetable_name ให้ตรงกับ Schema
+        //  [แก้ไข] เปลี่ยน vegetable_type เป็น vegetable_name ให้ตรงกับ Schema
         const { 
           vegetable_name,      
           planting_date,          
@@ -1685,7 +2418,7 @@ app.post('/api/sync-civic-data', async (req, res) => {
           continue;
         }
 
-        // ✅ [แก้ไข] บันทึกแผนการปลูกด้วยชื่อ column ที่ถูกต้อง
+        //  [แก้ไข] บันทึกแผนการปลูกด้วยชื่อ column ที่ถูกต้อง
         const planResult = await pool.query(`
           INSERT INTO planting_plans (
             external_plan_id, vegetable_name, planting_date, harvest_date,
@@ -1733,8 +2466,6 @@ app.post('/api/sync-civic-data', async (req, res) => {
       }
     }
 
-    console.log(`✅ ประมวลผล ${processedPlans.length} แผนจาก Civic Platform สำเร็จ`);
-    
     res.json({
       success: true,
       message: `ประมวลผลแผนการปลูก ${processedPlans.length} รายการสำเร็จ`,
@@ -1793,6 +2524,54 @@ const stationStates = {
     targetSlot: null,
     taskType: null, // 'inbound' หรือ 'outbound'
     sensorDebounceTimer: null // สำหรับ debounce sensor updates
+  },
+  2: {
+    flowState: 'idle',
+    latestLiftStatus: {},
+    latestAgvStatus: {},
+    latestAgvSensorStatus: {},
+    latestAirQualityData: {},
+    trayActionDone: false,
+    targetFloor: null,
+    targetSlot: null,
+    taskType: null,
+    sensorDebounceTimer: null
+  },
+  3: {
+    flowState: 'idle',
+    latestLiftStatus: {},
+    latestAgvStatus: {},
+    latestAgvSensorStatus: {},
+    latestAirQualityData: {},
+    trayActionDone: false,
+    targetFloor: null,
+    targetSlot: null,
+    taskType: null,
+    sensorDebounceTimer: null
+  },
+  4: {
+    flowState: 'idle',
+    latestLiftStatus: {},
+    latestAgvStatus: {},
+    latestAgvSensorStatus: {},
+    latestAirQualityData: {},
+    trayActionDone: false,
+    targetFloor: null,
+    targetSlot: null,
+    taskType: null,
+    sensorDebounceTimer: null
+  },
+  5: {
+    flowState: 'idle',
+    latestLiftStatus: {},
+    latestAgvStatus: {},
+    latestAgvSensorStatus: {},
+    latestAirQualityData: {},
+    trayActionDone: false,
+    targetFloor: null,
+    targetSlot: null,
+    taskType: null,
+    sensorDebounceTimer: null
   }
 };
 
@@ -1801,18 +2580,16 @@ const stationStates = {
 // =================================================================
 // MQTT Connect Event
 mqttClient.on('connect', () => {
-  console.log("✅ MQTT Connected (Backend)");
-
-  // ✅ Subscribe Topic ของ Lift, AGV, และ Tray
-  mqttClient.subscribe("automation/station1/lift/status");
-  mqttClient.subscribe('automation/station1/agv/status');
-  mqttClient.subscribe("automation/station1/lift/tray_action_done");
-  mqttClient.subscribe("automation/station1/agv/sensors");
-  mqttClient.subscribe("automation/station1/air/quality");
+  //  Subscribe Topic ของ Lift, AGV, และ Tray สำหรับทุก station (1-5)
+  for (let i = 1; i <= 5; i++) {
+    mqttClient.subscribe(`automation/station${i}/lift/status`);
+    mqttClient.subscribe(`automation/station${i}/agv/status`);
+    mqttClient.subscribe(`automation/station${i}/lift/tray_action_done`);
+    mqttClient.subscribe(`automation/station${i}/agv/sensors`);
+    mqttClient.subscribe(`automation/station${i}/air/quality`);
+  }
   mqttClient.subscribe('Layer_2/#', (err) => {
-    if (!err) {
-      console.log("✅ MQTT Subscribed successfully to all water topics (water/#)");
-    } else {
+    if (err) {
       console.error("❌ Failed to subscribe to water topics:", err);
     }
   });
@@ -1824,16 +2601,23 @@ mqttClient.on('connect', () => {
 // MQTT Message Handler (รวม Logic ของ Lift, AGV, และ Tray)
 mqttClient.on('message', async (topic, message) => {
   const msg = message.toString();
-  const stationId = 1; // รองรับสถานีเดียว (station 1) ในระบบปัจจุบัน
+
+  // แยก station ID จาก topic (รองรับทุก station 1-5)
+  let stationId = 1; // default
+  const stationMatch = topic.match(/station(\d+)/);
+  if (stationMatch) {
+    stationId = parseInt(stationMatch[1]);
+  }
+
   const state = stationStates[stationId];
   if (!state) return; // ป้องกันข้อผิดพลาดหากไม่มี state
 
-// ✅ [เพิ่มใหม่] Logic สำหรับรับข้อมูลเซ็นเซอร์ AGV พร้อม Debounce
-  if (topic === 'automation/station1/agv/sensors') {
+//  Logic สำหรับรับข้อมูลเซ็นเซอร์ AGV พร้อม Debounce
+  if (topic.includes('/agv/sensors')) {
     try {
       const payload = JSON.parse(msg);
       
-      // ✅ เช็คว่าข้อมูลเปลี่ยนแปลงหรือไม่ก่อนส่ง
+      //  เช็คว่าข้อมูลเปลี่ยนแปลงหรือไม่ก่อนส่ง
       const currentSensorData = JSON.stringify(payload);
       const previousSensorData = JSON.stringify(state.latestAgvSensorStatus || {});
       
@@ -1847,11 +2631,10 @@ mqttClient.on('message', async (topic, message) => {
         state.sensorDebounceTimer = setTimeout(() => {
           // เก็บสถานะล่าสุดไว้ใน state object
           state.latestAgvSensorStatus = payload;
-          
-          // ✅ ส่งข้อมูล sensor เฉพาะตอนที่เปลี่ยนแปลงผ่าน WebSocket
+
+          //  ส่งข้อมูล sensor เฉพาะตอนที่เปลี่ยนแปลงผ่าน WebSocket
           broadcastToClients('sensor_update', payload);
-          console.log('📡 Sensor data changed (fast), broadcasted to', clients.size, 'clients');
-          
+
           // Clear timer reference
           state.sensorDebounceTimer = null;
         }, 50); // 50ms debounce delay - เร็วขึ้น 6 เท่า
@@ -1861,8 +2644,8 @@ mqttClient.on('message', async (topic, message) => {
     }
   }
   
-  // ✅ [เพิ่มใหม่] Logic สำหรับรับข้อมูลเซ็นเซอร์อากาศ (CO2, Temperature, Humidity)
-  if (topic === 'automation/station1/air/quality' || msg.includes('CO2:') || msg.includes('Temp:') || msg.includes('Humidity:')) {
+  // Logic สำหรับรับข้อมูลเซ็นเซอร์อากาศ (CO2, Temperature, Humidity)
+  if (topic.includes('/air/quality') || msg.includes('CO2:') || msg.includes('Temp:') || msg.includes('Humidity:')) {
     try {
       let airData = {};
       
@@ -1894,7 +2677,7 @@ mqttClient.on('message', async (topic, message) => {
           last_updated: new Date().toISOString()
         };
         
-        // ✅ บันทึกข้อมูลลงฐานข้อมูล
+        //  บันทึกข้อมูลลงฐานข้อมูล
         try {
           await pool.query(`
             INSERT INTO air_quality_logs (station_id, co2_ppm, temperature_celsius, humidity_percent)
@@ -1905,14 +2688,12 @@ mqttClient.on('message', async (topic, message) => {
             airData.temperature || null,
             airData.humidity || null
           ]);
-          console.log('💾 Air quality data saved to database');
         } catch (dbError) {
           console.error('❌ Failed to save air quality data to database:', dbError.message);
         }
-        
+
         // ส่งข้อมูลผ่าน WebSocket
         broadcastToClients('air_quality_update', state.latestAirQualityData);
-        console.log('🌡️ Air quality data updated:', state.latestAirQualityData);
       }
     } catch (err) {
       console.error('❌ Failed to parse air quality data:', err.message);
@@ -1920,7 +2701,7 @@ mqttClient.on('message', async (topic, message) => {
   }
   
   // 🔽 Logic สำหรับ Lift Status
-  if (topic === "automation/station1/lift/status") {
+  if (topic.includes('/lift/status')) {
     try {
       const payload = JSON.parse(msg);
       const floor = parseInt(payload.floor) || 1;
@@ -1933,7 +2714,7 @@ mqttClient.on('message', async (topic, message) => {
 
       await pool.query(`
         INSERT INTO lift_status (station, floor, moving, emergency, recovery, step, updated_at)
-        VALUES (1, $1, $2, $3, $4, $5, NOW())
+        VALUES ($1, $2, $3, $4, $5, $6, NOW())
         ON CONFLICT (station) DO UPDATE
         SET floor = EXCLUDED.floor,
             moving = EXCLUDED.moving,
@@ -1941,9 +2722,9 @@ mqttClient.on('message', async (topic, message) => {
             recovery = EXCLUDED.recovery,
             step = EXCLUDED.step,
             updated_at = EXCLUDED.updated_at
-      `, [floor, moving, emergency, recovery, step]);
+      `, [stationId, floor, moving, emergency, recovery, step]);
 
-      console.log("✅ [DB] Updated lift_status → Floor:", floor, "| Step:", step, "| Moving:", moving, "| EM:", emergency, "| Recovery:", recovery);
+      console.log(`✅ [DB] Updated lift_status Station ${stationId} → Floor:`, floor, "| Step:", step, "| Moving:", moving, "| EM:", emergency, "| Recovery:", recovery);
       handleFlow(stationId);
 
     } catch (err) {
@@ -1953,11 +2734,11 @@ mqttClient.on('message', async (topic, message) => {
   }
 
   // 🔽 Logic สำหรับ AGV Status
-  if (topic === 'automation/station1/agv/status') {
+  if (topic.includes('/agv/status')) {
     try {
       const payload = JSON.parse(msg);
       state.latestAgvStatus = payload; // เก็บสถานะล่าสุด
-      console.log('[MQTT] 📡 รับ AGV Status:', payload.status);
+      console.log(`[MQTT] 📡 รับ AGV Status Station ${stationId}:`, payload.status);
 
       // ✅ [แก้ไข] ลบ Logic การอัปเดต DB ออกจากส่วนนี้ แล้วเรียก handleFlow อย่างเดียว
       handleFlow(stationId);
@@ -1968,9 +2749,9 @@ mqttClient.on('message', async (topic, message) => {
   }
 
   // 🔽 Logic เมื่อถาดทำงานเสร็จ
-  if (topic === "automation/station1/lift/tray_action_done") {
+  if (topic.includes('/lift/tray_action_done')) {
     state.trayActionDone = true;
-    console.log("[Tray] ✅ ถาดทำงานเสร็จแล้ว");
+    console.log(`[Tray] ✅ ถาดทำงานเสร็จแล้ว Station ${stationId}`);
     handleFlow(stationId);
   }
 });
@@ -2054,9 +2835,9 @@ app.get('/api/tray/history/:tray_id', async (req, res) => {
 // ✅ [Final Version] GET AGV's current status
 // ส่งสถานะจาก Flow การทำงานหลัก (flowState) เพื่อการแสดงผลที่แม่นยำที่สุด
 app.get('/api/agv/status', (req, res) => {
-  const stationId = 1;
+  const stationId = parseInt(req.query.station);
   const state = stationStates[stationId];
-  
+
   if (!state) {
     return res.json({ status: 'unknown' });
   }
@@ -2133,149 +2914,6 @@ app.get('/api/rgv/battery', (req, res) => {
   res.json(batteryData);
 });
 
-// 📸 API สำหรับ Image Processing - การสแกนผัก
-// API สำหรับดึงภาพจากกล้อง 4 ตัว
-app.get('/api/image-processing/cameras/:cameraId/stream', (req, res) => {
-  const cameraId = req.params.cameraId;
-  
-  // ❗ ตัวอย่างข้อมูล - ในการใช้งานจริงควรเชื่อมต่อกับกล้องจริง
-  const cameraData = {
-    success: true,
-    camera: {
-      id: cameraId,
-      name: getCameraName(cameraId),
-      status: 'active',
-      // ในการใช้งานจริง ส่ง stream URL หรือ base64 image
-      streamUrl: `/api/camera/stream/CAM00${cameraId}`,
-      resolution: '1920x1080',
-      fps: 30,
-      lastUpdate: new Date().toISOString()
-    }
-  };
-  
-  res.json(cameraData);
-});
-
-// API สำหรับการประมวลผลรูปภาพและตรวจจับผัก
-app.post('/api/image-processing/scan', async (req, res) => {
-  const { cameraId, imageData } = req.body;
-  
-  // ❗ ตัวอย่างการจำลอง AI Processing
-  // ในการใช้งานจริงจะต้องเชื่อมต่อกับ AI Model สำหรับตรวจจับผัก
-  
-  const startTime = Date.now();
-  
-  // จำลองเวลาในการประมวลผล (100-500ms)
-  await new Promise(resolve => setTimeout(resolve, Math.random() * 400 + 100));
-  
-  const processingTime = Date.now() - startTime;
-  
-  // ตัวอย่างผลการตรวจจับผัก (จำลอง)
-  const mockVegetables = [
-    { name: 'ผักกาดขาว', confidence: 0.95, position: { x: 120, y: 80, width: 60, height: 40 } },
-    { name: 'ผักบุ้งจีน', confidence: 0.87, position: { x: 200, y: 150, width: 80, height: 50 } },
-    { name: 'คะน้า', confidence: 0.92, position: { x: 50, y: 200, width: 70, height: 45 } }
-  ];
-  
-  // สุ่มจำนวนผักที่ตรวจพบ (0-3 ชนิด)
-  const detectedCount = Math.floor(Math.random() * 4);
-  const detectedVegetables = mockVegetables.slice(0, detectedCount);
-  
-  const scanResult = {
-    success: true,
-    timestamp: new Date().toISOString(),
-    camera: {
-      id: cameraId,
-      name: getCameraName(cameraId)
-    },
-    processing: {
-      time: processingTime,
-      algorithm: 'CNN-ResNet50',
-      modelVersion: 'v2.1.0'
-    },
-    results: {
-      totalDetected: detectedVegetables.length,
-      vegetables: detectedVegetables,
-      averageConfidence: detectedVegetables.length > 0 
-        ? Math.round(detectedVegetables.reduce((sum, veg) => sum + veg.confidence, 0) / detectedVegetables.length * 100) / 100
-        : 0
-    }
-  };
-  
-  res.json(scanResult);
-});
-
-// API สำหรับดึงสถิติการประมวลผล
-app.get('/api/image-processing/stats', (req, res) => {
-  // ❗ ตัวอย่างข้อมูลสถิติ - ในการใช้งานจริงควรเก็บไว้ใน Database
-  const stats = {
-    success: true,
-    timestamp: new Date().toISOString(),
-    daily: {
-      totalScanned: Math.floor(Math.random() * 500) + 100,
-      accuracyRate: 92.5 + Math.random() * 5, // 92.5-97.5%
-      averageProcessingTime: Math.floor(Math.random() * 100) + 150, // 150-250ms
-      activeCameras: 4
-    },
-    cameras: [
-      { id: 1, name: 'กล้องบน', processed: Math.floor(Math.random() * 150) + 50, accuracy: 95.2 },
-      { id: 2, name: 'กล้องล่าง', processed: Math.floor(Math.random() * 150) + 50, accuracy: 93.8 },
-      { id: 3, name: 'กล้องซ้าย', processed: Math.floor(Math.random() * 150) + 50, accuracy: 94.1 },
-      { id: 4, name: 'กล้องขวา', processed: Math.floor(Math.random() * 150) + 50, accuracy: 91.7 }
-    ],
-    vegetableTypes: [
-      { name: 'ผักกาดขาว', count: Math.floor(Math.random() * 50) + 20 },
-      { name: 'ผักบุ้งจีน', count: Math.floor(Math.random() * 40) + 15 },
-      { name: 'คะน้า', count: Math.floor(Math.random() * 35) + 10 },
-      { name: 'ผักชี', count: Math.floor(Math.random() * 30) + 8 },
-      { name: 'กะหล่ำปลี', count: Math.floor(Math.random() * 25) + 5 }
-    ]
-  };
-  
-  res.json(stats);
-});
-
-// API สำหรับการควบคุมระบบ Image Processing
-app.post('/api/image-processing/control', (req, res) => {
-  const { action, cameraId } = req.body;
-  
-  let message = '';
-  let success = true;
-  
-  switch (action) {
-    case 'start':
-      message = cameraId ? `เริ่มการประมวลผลกล้อง ${getCameraName(cameraId)}` : 'เริ่มการประมวลผลทุกกล้อง';
-      break;
-    case 'stop':
-      message = cameraId ? `หยุดการประมวลผลกล้อง ${getCameraName(cameraId)}` : 'หยุดการประมวลผลทุกกล้อง';
-      break;
-    case 'capture':
-      message = cameraId ? `ถ่ายภาพจากกล้อง ${getCameraName(cameraId)}` : 'ถ่ายภาพจากทุกกล้อง';
-      break;
-    default:
-      message = 'คำสั่งไม่ถูกต้อง';
-      success = false;
-  }
-  
-  res.json({
-    success,
-    message,
-    timestamp: new Date().toISOString(),
-    action,
-    cameraId: cameraId || 'all'
-  });
-});
-
-// ฟังก์ชันช่วยสำหรับแปลง ID เป็นชื่อกล้อง
-function getCameraName(cameraId) {
-  const cameraNames = {
-    '1': 'กล้องบน (Top Camera)',
-    '2': 'กล้องล่าง (Bottom Camera)', 
-    '3': 'กล้องซ้าย (Left Camera)',
-    '4': 'กล้องขวา (Right Camera)'
-  };
-  return cameraNames[cameraId] || `กล้อง ${cameraId}`;
-}
 
 // =================================================================
 // 🔄 Automation Flow Control
@@ -2354,7 +2992,7 @@ async function handleFlow(stationId) {
   switch (state.flowState) {
     case 'inbound_start_lift_tray':
       logState(stationId, `[INBOUND] เริ่มต้น → สั่ง AGV ยกถาดขึ้น (pickup_tray)`);
-      mqttClient.publish(`automation/station1/tray/command`, JSON.stringify({ command: 'pickup_tray' }));
+      mqttClient.publish(`automation/station${stationId}/tray/command`, JSON.stringify({ command: 'pickup_tray' }));
       state.flowState = 'inbound_wait_for_tray_lift';
       break;
 
@@ -2364,13 +3002,13 @@ async function handleFlow(stationId) {
         await delay(500);
         state.trayActionDone = false;
         logState(stationId, `[INBOUND] เริ่มเคลื่อนที่`);
-        if (state.targetFloor === 2) {
-          logState(stationId, 'ชั้น 2 → ไม่ใช้ลิฟต์ → ไป slot ทันที');
-          mqttClient.publish(`automation/station1/agv/command`, JSON.stringify({ command: getGoToSlotCommand(state.targetSlot) }));
+        if (state.targetFloor === 1) {
+          logState(stationId, 'ชั้น 1 → ไม่ใช้ลิฟต์ → ไป slot ทันที');
+          mqttClient.publish(`automation/station${stationId}/agv/command`, JSON.stringify({ command: getGoToSlotCommand(state.targetSlot) }));
           state.flowState = 'wait_agv_at_slot';
         } else {
-          logState(stationId, 'ชั้น ≠ 2 → ต้องใช้ลิฟต์ → เริ่มต้น AGV ไป lift');
-          mqttClient.publish(`automation/station1/agv/command`, JSON.stringify({ command: 'go_lift' }));
+          logState(stationId, 'ชั้น ≠ 1 → ต้องใช้ลิฟต์ → เริ่มต้น AGV ไป lift');
+          mqttClient.publish(`automation/station${stationId}/agv/command`, JSON.stringify({ command: 'go_lift' }));
           state.flowState = 'wait_agv_at_lift';
         }
       }
@@ -2378,11 +3016,11 @@ async function handleFlow(stationId) {
 
     case 'start':
       logState(stationId, `[OUTBOUND] เริ่มต้น → เริ่มเคลื่อนที่ไป Slot`);
-      if (state.targetFloor === 2) {
-        mqttClient.publish(`automation/station1/agv/command`, JSON.stringify({ command: getGoToSlotCommand(state.targetSlot) }));
+      if (state.targetFloor === 1) {
+        mqttClient.publish(`automation/station${stationId}/agv/command`, JSON.stringify({ command: getGoToSlotCommand(state.targetSlot) }));
         state.flowState = 'wait_agv_at_slot';
       } else {
-        mqttClient.publish(`automation/station1/agv/command`, JSON.stringify({ command: 'go_lift' }));
+        mqttClient.publish(`automation/station${stationId}/agv/command`, JSON.stringify({ command: 'go_lift' }));
         state.flowState = 'wait_agv_at_lift';
       }
       break;
@@ -2392,7 +3030,7 @@ async function handleFlow(stationId) {
         logState(stationId, 'AGV ถึง Lift → รอ 0.5 วินาทีเพื่อความเสถียร');
         await delay(500);
         logState(stationId, 'AGV ถึง Lift → ยกลิฟต์ขึ้นชั้นเป้าหมาย');
-        mqttClient.publish(`automation/station1/lift/command`, JSON.stringify({ action: 'moveTo', floor: state.targetFloor }));
+        mqttClient.publish(`automation/station${stationId}/lift/command`, JSON.stringify({ action: 'moveTo', floor: state.targetFloor }));
         state.flowState = 'lift_moving_up';
       }
       break;
@@ -2402,7 +3040,7 @@ async function handleFlow(stationId) {
         logState(stationId, `Lift ถึงชั้น ${state.targetFloor} → รอ 0.5 วินาที`);
         await delay(500);
         logState(stationId, `Lift ถึงชั้น ${state.targetFloor} → AGV ไปยัง slot`);
-        mqttClient.publish(`automation/station1/agv/command`, JSON.stringify({ command: getGoToSlotCommand(state.targetSlot) }));
+        mqttClient.publish(`automation/station${stationId}/agv/command`, JSON.stringify({ command: getGoToSlotCommand(state.targetSlot) }));
         state.flowState = 'wait_agv_at_slot';
       }
       break;
@@ -2413,7 +3051,7 @@ async function handleFlow(stationId) {
         await delay(500);
         const trayCommand = (state.taskType === 'inbound') ? 'place_tray' : 'pickup_tray';
         logState(stationId, `AGV ถึงช่องแล้ว → สั่ง ${trayCommand}`);
-        mqttClient.publish(`automation/station1/tray/command`, JSON.stringify({ command: trayCommand }));
+        mqttClient.publish(`automation/station${stationId}/tray/command`, JSON.stringify({ command: trayCommand }));
         state.flowState = 'wait_tray_action_done';
       }
       break;
@@ -2441,14 +3079,18 @@ case 'wait_tray_action_done':
         
         // บันทึกถาดใหม่ลง inventory พร้อมข้อมูลจาก Plan
         await pool.query(
-          `INSERT INTO tray_inventory (tray_id, veg_type, floor, slot, username, time_in, plant_quantity, batch_id, seeding_date, notes, status, station_id, planting_plan_id, harvest_date) 
-           VALUES ($1, $2, $3, $4, $5, NOW(), $6, $7, $8, $9, 'on_shelf', $10, $11, $12)`,
+          `INSERT INTO tray_inventory (tray_id, veg_type, floor, slot, username, time_in, plant_quantity, batch_id, seeding_date, notes, status, station_id, planting_plan_id, harvest_date, water_system, ec_value, ph_value, water_close_date)
+           VALUES ($1, $2, $3, $4, $5, NOW(), $6, $7, $8, $9, 'on_shelf', $10, $11, $12, $13, $14, $15, $16)`,
           [
             state.trayId, state.vegType, state.targetFloor, state.targetSlot,
             state.username, state.plantQuantity, state.batchId,
             state.seedingDate, state.notes, state.stationId,
             state.plantingPlanId, // 👈 บันทึก ID ของ Plan
-            harvestDate           // 👈 บันทึกวันเก็บเกี่ยว
+            harvestDate,          // 👈 บันทึกวันเก็บเกี่ยว
+            state.waterSystem,    // 🌊 บันทึกระบบน้ำ
+            state.ecValue,        // ⚡ บันทึกค่า EC
+            state.phValue,        // 💧 บันทึกค่า pH
+            state.waterCloseDate  // 💦 บันทึกวันปิดน้ำ
           ]
         );
         console.log(`✅ [DB] Inbound: Added new tray ${state.trayId} to inventory.`);
@@ -2479,16 +3121,16 @@ case 'wait_tray_action_done':
 
     // --- ส่วนที่เหลือของโค้ดใน case นี้ยังคงเหมือนเดิม ---
     await delay(500);
-    logState(stationId, 'ฐานข้อมูลอัปเดตแล้ว → เตรียมเดินทางกลับ');
+    logState(stationId, 'ฐานข้อมูลอัปเดตแล้ว → เตรียมเดินทางกลับ'); 
     state.trayActionDone = false; 
 
-    if (state.targetFloor === 2) {
-      logState(stationId, 'ชั้น 2 → AGV กลับบ้านเลย');
-      mqttClient.publish(`automation/station1/agv/command`, JSON.stringify({ command: 'go_home' }));
+    if (state.targetFloor === 1) {
+      logState(stationId, 'ชั้น 1 → AGV กลับบ้านเลย');
+      mqttClient.publish(`automation/station${stationId}/agv/command`, JSON.stringify({ command: 'go_home' }));
       state.flowState = 'wait_agv_home';
     } else {
-      logState(stationId, 'ชั้น ≠ 2 → AGV กลับไปที่ lift');
-      mqttClient.publish(`automation/station1/agv/command`, JSON.stringify({ command: 'go_lift' }));
+      logState(stationId, 'ชั้น ≠ 1 → AGV กลับไปที่ lift');
+      mqttClient.publish(`automation/station${stationId}/agv/command`, JSON.stringify({ command: 'go_lift' }));
       state.flowState = 'wait_agv_return_to_lift';
     }
   }
@@ -2498,18 +3140,18 @@ case 'wait_tray_action_done':
       if (agv?.location === 'at_lift') {
         logState(stationId, 'AGV กลับถึง Lift → รอ 0.5 วินาที');
         await delay(500);
-        logState(stationId, 'AGV กลับถึง Lift → สั่งลิฟต์ลงชั้น 2');
-        mqttClient.publish(`automation/station1/lift/command`, JSON.stringify({ action: 'moveTo', floor: 2 }));
+        logState(stationId, 'AGV กลับถึง Lift → สั่งลิฟต์ลงชั้น 1');
+        mqttClient.publish(`automation/station${stationId}/lift/command`, JSON.stringify({ action: 'moveTo', floor: 1 }));
         state.flowState = 'lift_moving_down';
       }
       break;
 
     case 'lift_moving_down':
-      if (!lift?.moving && lift?.floor === 2) {
-        logState(stationId, 'Lift ลงถึงชั้น 2 → รอ 0.5 วินาที');
+      if (!lift?.moving && lift?.floor === 1) {
+        logState(stationId, 'Lift ลงถึงชั้น 1 → รอ 0.5 วินาที');
         await delay(500);
-        logState(stationId, 'Lift ลงถึงชั้น 2 → AGV กลับบ้าน');
-        mqttClient.publish(`automation/station1/agv/command`, JSON.stringify({ command: 'go_home' }));
+        logState(stationId, 'Lift ลงถึงชั้น 1 → AGV กลับบ้าน');
+        mqttClient.publish(`automation/station${stationId}/agv/command`, JSON.stringify({ command: 'go_home' }));
         state.flowState = 'wait_agv_home';
       }
       break;
@@ -2520,7 +3162,7 @@ case 'wait_tray_action_done':
         await delay(500);
         if (state.taskType === 'outbound') {
           logState(stationId, '[OUTBOUND] AGV ถึงบ้านแล้ว → สั่งวางถาด (place_tray)');
-          mqttClient.publish(`automation/station1/tray/command`, JSON.stringify({ command: 'place_tray' }));
+          mqttClient.publish(`automation/station${stationId}/tray/command`, JSON.stringify({ command: 'place_tray' }));
           state.flowState = 'outbound_wait_for_final_place';
         } else {
           logState(stationId, '[INBOUND] AGV กลับถึงบ้านแล้ว → Flow เสร็จสมบูรณ์');
@@ -2659,132 +3301,6 @@ app.post('/api/workstation/dispose', async (req, res) => {
 
 
 
-
-
-// ✅ เก็บกล้องที่ register เข้ามา
-let cameras = {};
-
-// ✅ Auto-register cameras on server start
-function initializeCameras() {
-  // Register default cameras
-  const defaultCameras = [
-    { camera_id: 'CAM001', ip: '127.0.0.1' },
-    { camera_id: 'CAM002', ip: '127.0.0.1' }
-  ];
-  
-  defaultCameras.forEach(({ camera_id, ip }) => {
-    cameras[camera_id] = { ip, registered_at: new Date() };
-    console.log(`📸 Auto-registered Camera: ${camera_id} → ${ip}`);
-  });
-}
-
-// ✅ รับ register กล้อง
-app.post('/api/camera/register', (req, res) => {
-  const { camera_id, ip } = req.body;
-  if (!camera_id || !ip) {
-    return res.status(400).json({ error: "camera_id และ ip ต้องไม่ว่าง" });
-  }
-
-  cameras[camera_id] = { ip, registered_at: new Date() };
-  console.log(`📸 Camera Registered: ${camera_id} → ${ip}`);
-  res.json({ message: "Camera registered" });
-});
-
-// ✅ ดูรายการกล้องที่ register ไว้
-app.get('/api/camera/list', (req, res) => {
-  res.json({
-    cameras: cameras,
-    total: Object.keys(cameras).length
-  });
-});
-
-// ✅ ดึง stream กล้อง → stream pass-through แบบ raw 100%
-const net = require('net');
-const { URL } = require('url');
-
-app.get('/api/camera/stream/:camera_id', (req, res) => {
-  const camera_id = req.params.camera_id;
-  const camera = cameras[camera_id];
-
-  if (!camera) {
-    console.error('❌ Camera not found:', camera_id);
-    return res.status(404).send('Camera not found');
-  }
-
-  const targetUrl = `http://${camera.ip}/stream`;
-  console.log(`📡 Proxy streaming camera: ${camera_id} → ${targetUrl}`);
-
-  const url = new URL(targetUrl);
-  const socket = net.connect(url.port || 80, url.hostname, () => {
-    socket.write(`GET ${url.pathname} HTTP/1.1\r\n`);
-    socket.write(`Host: ${url.hostname}\r\n`);
-    socket.write(`Connection: keep-alive\r\n`);  // ✅ เปลี่ยนเป็น keep-alive สำหรับ real-time streaming
-    socket.write(`Cache-Control: no-cache\r\n`);
-    socket.write(`\r\n`);
-  });
-
-  // ✅ ปรับแต่ง socket สำหรับ real-time performance
-  socket.setTimeout(0); // ไม่มี timeout
-  socket.setNoDelay(true); // ส่งข้อมูลทันทีไม่รอ buffer
-
-  let headerParsed = false;
-  let headerBuffer = Buffer.alloc(0);
-
-  socket.on('data', (chunk) => {
-    if (!headerParsed) {
-      headerBuffer = Buffer.concat([headerBuffer, chunk]);
-      const headerEnd = headerBuffer.indexOf('\r\n\r\n');
-      if (headerEnd !== -1) {
-        const headers = headerBuffer.slice(0, headerEnd).toString();
-        const body = headerBuffer.slice(headerEnd + 4);
-
-        // ✅ ดึง Content-Type จาก header จริง
-        let contentType = 'multipart/x-mixed-replace; boundary=frame';
-        const match = headers.match(/Content-Type:\s*(.+)/i);
-        if (match) {
-          contentType = match[1].replace('--boundarydonotcross', 'frame').trim();
-        }
-
-        res.writeHead(200, { 
-          'Content-Type': contentType,
-          'Cache-Control': 'no-cache, no-store, must-revalidate',
-          'Pragma': 'no-cache',
-          'Expires': '0',
-          'X-Accel-Buffering': 'no' // ปิด buffering สำหรับ nginx
-        });
-        res.write(body);
-        headerParsed = true;
-      }
-    } else {
-      res.write(chunk);
-    }
-  });
-
-  socket.on('end', () => {
-    console.log(`✅ Stream ended: ${camera_id}`);
-    res.end();
-  });
-
-  socket.on('error', (err) => {
-    console.error(`❌ Camera ${camera_id} connection error:`, err.message);
-    if (!res.headersSent) {
-      res.status(500).json({ 
-        error: 'Camera connection failed', 
-        camera_id: camera_id,
-        target_url: targetUrl,
-        message: err.message
-      });
-    } else {
-      res.end();
-    }
-  });
-
-  // ✅ กรณี client กดปิด tab ให้ terminate socket ทันที
-  req.on('close', () => {
-    console.log(`⚠️ Client closed connection: ${camera_id}`);
-    socket.destroy();
-  });
-});
 // ✅ MANUAL AGV COMMAND (ปรับใหม่ให้ยิงตรง agv/command)
 app.post('/api/agv/manual', (req, res) => {
   const { userId, station, command } = req.body;
@@ -2824,7 +3340,7 @@ app.post('/api/tray/manual', (req, res) => {
 // ✅ [เพิ่มใหม่] API สำหรับ Summary Cards ในหน้า Overview
 app.get('/api/overview/summary-cards', async (req, res) => {
   try {
-    const stationId = req.query.station || '1';
+    const stationId = req.query.station;
 
     // 1. Inbound/Outbound วันนี้
     const todayStatsRes = await pool.query(
@@ -2861,10 +3377,10 @@ app.get('/api/overview/summary-cards', async (req, res) => {
 
 app.get('/api/overview/summary-cards', async (req, res) => {
   try {
-    const station = parseInt(req.query.station) || 1;
+    const station = parseInt(req.query.station);
     const today = new Date().toISOString().split('T')[0];
     const yesterday = new Date(Date.now() - 86400000).toISOString().split('T')[0];
-    
+
     // ข้อมูลวันนี้
     const todayResult = await pool.query(`
       SELECT 
@@ -3084,442 +3600,144 @@ app.post('/api/users/ping', async (req, res) => {
     }
 });
 
-
 // ===============================================
-// ✅ GLOBAL VARIABLES FOR LIGHT CONTROL (IN BACKEND)
+// 💡 API Endpoints สำหรับระบบควบคุมแสงสว่าง (Modbus RTU)
 // ===============================================
-let lightSchedules = {}; // Stores loaded schedules from database (Backend's cache)
-let currentLightState = {}; // Stores current state of lights (intensity, isManuallyOverridden) in Backend
 
-// ✅ MQTT Command Queue for Backend Publishing
-const mqttCommandQueue = [];
-let isProcessingMqttQueue = false;
-
-// Funct// ✅ ฟังก์ชันจัดการคิวที่แก้ไขแล้ว (เพิ่ม Delay เป็น 500ms)
-async function processMqttQueue() {
-    if (mqttCommandQueue.length === 0) {
-        isProcessingMqttQueue = false;
-        return;
-    }
-
-    isProcessingMqttQueue = true;
-    const command = mqttCommandQueue.shift(); // ดึงคำสั่งแรกออกจากคิว
-
+// GET /api/light-control/status - ดึงสถานะไฟทั้งหมด
+app.get('/api/light-control/status', async (req, res) => {
     try {
-        mqttClient.publish(command.topic, command.payload);
-        console.log(`📤 MQTT Publish >> ${command.topic}`, command.payload);
+        const { rows: lights } = await pool.query('SELECT * FROM light_control_lights ORDER BY floor, position');
+        const { rows: devices } = await pool.query('SELECT * FROM light_control_devices ORDER BY light_id, device_type');
+
+        const result = lights.map(light => {
+            const lightDevices = devices.filter(d => d.light_id === light.light_id);
+            return {
+                lightId: light.light_id,
+                floor: light.floor,
+                position: light.position,
+                name: light.name,
+                devices: {
+                    whiteLight: lightDevices.find(d => d.device_type === 'whiteLight') || {},
+                    redLight: lightDevices.find(d => d.device_type === 'redLight') || {},
+                    fan: lightDevices.find(d => d.device_type === 'fan') || {}
+                }
+            };
+        });
+
+        res.json(result);
     } catch (error) {
-        console.error('❌ MQTT Publish Error:', error.message);
-    }
-
-    // --- 💡 [จุดที่แก้ไข] เพิ่มเวลาหน่วงเป็น 500ms ---
-    // เพื่อให้ ESP32 และไดรเวอร์ Modbus มีเวลาประมวลผลมากขึ้น
-    await delay(3000); 
-    
-    processMqttQueue(); // เรียกตัวเองเพื่อทำงานกับคำสั่งถัดไปในคิว
-}
-
-
-// ✅ [ULTIMATE & PROVEN MAPPING] - แก้ไขตามผลการทดสอบจริง
-function getLightParams(floor, type) {
-    const floorNum = parseInt(floor);
-
-    const settings = {
-        // ✅ ชั้น 1 (ยืนยันแล้ว)
-        FLOOR_1_SETTINGS: { 
-            'light-white': { layer: 1, dir: 7 },
-            'light-red':   { layer: 1, dir: 5 }, // 👈 แก้ไข dir ของไฟแดง
-            'fan':         { layer: 1, dir: 101 } 
-        },
-        // ✅ ชั้น 2
-        FLOOR_2_SETTINGS: { 
-            'light-white': { layer: 2, dir: 7 }, 
-            'light-red':   { layer: 2, dir: 5 }, // 👈 แก้ไข dir ของไฟแดง
-            'fan':         { layer: 1, dir: 103 } 
-        },
-        // ✅ ชั้น 3
-        FLOOR_3_SETTINGS: { 
-            'light-white': { layer: 1, dir: 3 }, 
-            'light-red':   { layer: 1, dir: 1 }, // 👈 แก้ไข dir ของไฟแดง
-            'fan':         { layer: 2, dir: 101 } 
-        },
-        // ✅ ชั้น 4
-        FLOOR_4_SETTINGS: { 
-            'light-white': { layer: 3, dir: 7 }, 
-            'light-red':   { layer: 3, dir: 5 }, // 👈 แก้ไข dir ของไฟแดง
-            'fan':         { layer: 3, dir: 101 } 
-        },
-        // ✅ ชั้น 5
-        FLOOR_5_SETTINGS: { 
-            'light-white': { layer: 3, dir: 3 }, 
-            'light-red':   { layer: 3, dir: 1 }, // 👈 แก้ไข dir ของไฟแดง
-            'fan':         { layer: 3, dir: 103 } 
-        }
-    };
-
-    const mapping = {
-        1: settings.FLOOR_1_SETTINGS,
-        2: settings.FLOOR_2_SETTINGS,
-        3: settings.FLOOR_3_SETTINGS,
-        4: settings.FLOOR_4_SETTINGS,
-        5: settings.FLOOR_5_SETTINGS,
-    };
-
-    return mapping[floorNum] ? mapping[floorNum][type] : null;
-}
-// 2. Function to send MQTT commands (uses queue)
-function sendLightCommandToHardware(layer, dir, distance) {
-    const topic = "LED"; // This topic should match what ESP32 subscribes to
-    const payload = JSON.stringify({
-        Key: "Apple",
-        command: "DIM", 
-        layer: layer,
-        dir: dir,
-        distance: parseInt(distance)
-    });
-
-    mqttCommandQueue.push({ topic, payload });
-    if (!isProcessingMqttQueue) {
-        processMqttQueue(); // Start processing the queue if not already running
-    }
-}
-
-// 3. Function to check if current time is within schedule (Thailand Time - GMT+7)
-function isTimeWithin(onTimeStr, offTimeStr) {
-    if (!onTimeStr || !offTimeStr) return false;
-
-    const now = new Date();
-    // Adjust to Thailand Time (GMT+7)
-    const utc = now.getTime() + (now.getTimezoneOffset() * 60000);
-    const thTime = new Date(utc + (3600000 * 7)); // 3600000 ms = 1 hour
-
-    const [onHours, onMinutes] = onTimeStr.split(':').map(Number);
-    const onDate = new Date(thTime.getFullYear(), thTime.getMonth(), thTime.getDate(), onHours, onMinutes, 0);
-
-    const [offHours, offMinutes] = offTimeStr.split(':').map(Number);
-    const offDate = new Date(thTime.getFullYear(), thTime.getMonth(), thTime.getDate(), offHours, offMinutes, 0);
-
-    // Handle overnight schedules (e.g., 23:00 - 02:00)
-    if (offDate <= onDate) {
-        if (thTime < onDate) { // Current time is before 'on' time today (schedule started yesterday)
-            onDate.setDate(onDate.getDate() - 1);
-        } else { // Current time is after 'on' time today (schedule ends tomorrow)
-            offDate.setDate(offDate.getDate() + 1);
-        }
-    }
-    return thTime >= onDate && thTime < offDate;
-}
-
-
-
-// 4. Main Scheduler Logic (Backend) - ฉบับแก้ไข
-function startAutomaticLightScheduler() {
-    console.log("⏰ Light Scheduler Initialized in Backend (v2 - Corrected Override Logic).");
-    const schedulerInterval = setInterval(async () => {
-        try {
-            // ❌ ไม่มีการเรียก await loadSchedulesFromDB(); ในนี้แล้ว
-
-            for (let floor = 1; floor <= 5; floor++) {
-                ['light-white', 'light-red', 'fan'].forEach(type => {
-                    const key = `${floor}-${type}`;
-                    const schedule = lightSchedules[key];
-                    
-                    if (!currentLightState[key]) {
-                        currentLightState[key] = { intensity: 0, isManuallyOverridden: false };
-                    }
-                    const state = currentLightState[key];
-                    const params = getLightParams(floor, type);
-                    if (!params) return;
-
-                    const shouldBeOnBySchedule = schedule && schedule.enabled && isTimeWithin(schedule.on, schedule.off);
-
-                    if (state.isManuallyOverridden) {
-                        // เมื่อถูก Manual Override, Scheduler จะไม่ยุ่งเกี่ยวเลย
-                    } 
-                    else if (shouldBeOnBySchedule) {
-                        // ไม่ถูก Override และตารางบอกว่า "ควรเปิด"
-                        if (state.intensity !== schedule.intensity) {
-                            console.log(`⏰ ACTION: Turning ON ${key} to ${schedule.intensity}% (ตามตาราง)`);
-                            sendLightCommandToHardware(params.layer, params.dir, schedule.intensity);
-                            state.intensity = schedule.intensity;
-                        }
-                    } 
-                    else {
-                        // ไม่ถูก Override และตารางบอกว่า "ควรปิด"
-                        if (state.intensity > 0) {
-                            console.log(`⏰ ACTION: Turning OFF ${key} (สิ้นสุดตาราง/ไม่มีตาราง)`);
-                            sendLightCommandToHardware(params.layer, params.dir, 0);
-                            state.intensity = 0;
-                        }
-                    }
-                });
-            }
-        } catch (err) {
-            console.error("❌ Scheduler Error:", err);
-        }
-    }, 5000); // ตรวจสอบทุก 5 วินาที
-}
-
-// 5. Function to load schedules from database (Backend)
-async function loadSchedulesFromDB() {
-    try {
-        const { rows } = await pool.query('SELECT * FROM light_schedules ORDER BY floor, type');
-        const newSchedules = {};
-        rows.forEach(row => {
-            const key = `${row.floor}-${row.type}`;
-            newSchedules[key] = {
-                intensity: row.intensity,
-                on: row.on_time,
-                off: row.off_time,
-                enabled: row.enabled,
-            };
-        });
-        lightSchedules = newSchedules; // Update backend's cache of schedules
-        console.log(`✅ Loaded ${rows.length} light schedules from database.`);
-    } catch (err) {
-        console.error('❌ Failed to load light schedules from database:', err);
-    }
-}
-
-// ===============================================
-// ✅ LIGHT CONTROL API Endpoints (Backend)
-// ===============================================
-app.post('/api/lights/schedule', async (req, res) => {
-    const { floor, type, intensity, onTime, offTime, enabled } = req.body;
-    try {
-        const query = `
-            INSERT INTO light_schedules (floor, type, intensity, on_time, off_time, enabled, updated_at)
-            VALUES ($1, $2, $3, $4, $5, $6, NOW())
-            ON CONFLICT (floor, type) DO UPDATE SET
-                intensity = EXCLUDED.intensity,
-                on_time = EXCLUDED.on_time,
-                off_time = EXCLUDED.off_time,
-                enabled = EXCLUDED.enabled,
-                updated_at = NOW()
-            RETURNING *;
-        `;
-        const { rows } = await pool.query(query, [floor, type, parseInt(intensity), onTime, offTime, enabled]);
-
-        const key = `${rows[0].floor}-${rows[0].type}`;
-        if (currentLightState[key]) {
-            currentLightState[key].isManuallyOverridden = false;
-            console.log(`🔄 Reset Manual Override for ${key}.`);
-        }
-
-        await loadSchedulesFromDB(); // ✅ เพิ่มบรรทัดนี้เข้ามา เพื่อโหลดข้อมูลใหม่ทันที
-
-        console.log('✅ DB Updated:', rows[0].floor, rows[0].type);
-        res.json({ message: 'บันทึกตารางเวลาสำเร็จ', schedule: rows[0] });
-        
-    } catch (err) {
-        console.error('❌ Error saving schedule to DB:', err);
-        res.status(500).json({ error: 'เกิดข้อผิดพลาดในการบันทึกข้อมูล' });
-    }
-});
-
-// GET /api/lights/schedule - Fetch all schedules (โค้ดเดิมถูกต้องแล้ว)
-app.get('/api/lights/schedule', async (req, res) => {
-    try {
-        const { rows } = await pool.query('SELECT * FROM light_schedules ORDER BY floor, type');
-        const formattedSchedules = {};
-        rows.forEach(row => {
-            const key = `${row.floor}-${row.type}`;
-            formattedSchedules[key] = {
-                intensity: row.intensity,
-                on: row.on_time,
-                off: row.off_time,
-                enabled: row.enabled,
-            };
-        });
-        res.json(formattedSchedules);
-    } catch (err) {
-        console.error('❌ Error fetching schedules from DB:', err);
+        console.error('❌ Error fetching light status:', error);
         res.status(500).json({ error: 'เกิดข้อผิดพลาดในการดึงข้อมูล' });
     }
 });
 
-// DELETE /api/lights/schedule/all - Clear all schedules (โค้ดเดิมถูกต้องแล้ว)
-app.delete('/api/lights/schedule/all', async (req, res) => {
-    try {
-        // First, turn off all lights controlled by schedule
-        for (let floor = 1; floor <= 5; floor++) { // Loop all 5 floors
-            ['light-white', 'light-red', 'fan'].forEach(type => {
-                const params = getLightParams(floor, type);
-                if (params) {
-                    sendLightCommandToHardware(params.layer, params.dir, 0); // Send DIM 0
-                }
-            });
-        }
-        
-        // Then, truncate the database table
-        await pool.query('TRUNCATE TABLE light_schedules RESTART IDENTITY;');
-        
-        // Reset Backend's cache and state variables
-        lightSchedules = {};
-        currentLightState = {}; // All lights are now off and not manually overridden
-        
-        console.log('🗑️ All light schedules cleared from DB and Backend cache. Lights commanded OFF.');
-        res.json({ message: 'ล้างข้อมูลการตั้งเวลาทั้งหมดสำเร็จ' });
-        
-    } catch (err) {
-        console.error('❌ Error clearing all schedules:', err);
-        res.status(500).json({ error: 'เกิดข้อผิดพลาดในการล้างข้อมูล' });
-    }
-});
-
-// --- API for real-time light control (Manual commands from Frontend) ---
-// ✅ โค้ดใหม่ที่แก้ไขแล้ว
-app.post('/api/lights/control', async (req, res) => {
-    const { floor, type, distance } = req.body;
-    const id = `${floor}-${type}`;
-
-    if (!currentLightState[id]) {
-        currentLightState[id] = { intensity: 0, isManuallyOverridden: false };
-    }
-    currentLightState[id].intensity = parseInt(distance);
-    currentLightState[id].isManuallyOverridden = parseInt(distance) !== 0;
-
-    // 🟢 ไม่มีการเรียก sendLightCommandToHardware จากตรงนี้แล้ว
-
-    res.json({ message: "รับค่าเรียบร้อย" });
-});
-// POST /api/lights/off/all - Force turn off all lights (global button)
-app.post('/api/lights/off/all', async (req, res) => {
-    console.log('🚨 FORCE SHUTDOWN: Received command to turn off all lights from Frontend.');
-
-    for (let floor = 1; floor <= 5; floor++) { // วนลูป 5 ชั้น
-        ['light-white', 'light-red', 'fan'].forEach(type => {
-            const key = `${floor}-${type}`;
-            const params = getLightParams(floor, type); // ดึงค่า layer, dir ที่ถูกต้อง
-
-            if (params) {
-                // --- ✨ [จุดที่แก้ไข] เพิ่มการเรียกใช้ฟังก์ชันนี้เพื่อส่งคำสั่งปิดจริงๆ ---
-                sendLightCommandToHardware(params.layer, params.dir, 0); 
-
-                // อัปเดตสถานะใน Backend (ส่วนนี้ถูกต้องอยู่แล้ว)
-                if (!currentLightState[key]) {
-                    currentLightState[key] = { intensity: 0, isManuallyOverridden: false };
-                }
-                currentLightState[key].intensity = 0;
-                currentLightState[key].isManuallyOverridden = true; 
-            }
-        });
-    }
-    res.json({ message: 'ส่งคำสั่งปิดไฟทั้งหมดเรียบร้อย' });
-});
-// ✅ [NEW & STABLE] Endpoint สำหรับรับข้อมูล Schedule ทั้งหมดในครั้งเดียว
-app.post('/api/lights/schedule/batch', async (req, res) => {
-    const schedules = req.body; // รับ Array ของ schedules ทั้งหมด
-    const client = await pool.connect(); // เชื่อมต่อ Database
+// POST /api/light-control/control - ควบคุมไฟแบบ Manual
+app.post('/api/light-control/control', async (req, res) => {
+    const { lightId, deviceType, intensity, isOn } = req.body;
 
     try {
-        await client.query('BEGIN'); //  TRANSACTION START
-
-        for (const schedule of schedules) {
-            const { floor, type, intensity, onTime, offTime, enabled } = schedule;
-            const query = `
-                INSERT INTO light_schedules (floor, type, intensity, on_time, off_time, enabled, updated_at)
-                VALUES ($1, $2, $3, $4, $5, $6, NOW())
-                ON CONFLICT (floor, type) DO UPDATE SET
-                    intensity = EXCLUDED.intensity,
-                    on_time = EXCLUDED.on_time,
-                    off_time = EXCLUDED.off_time,
-                    enabled = EXCLUDED.enabled,
-                    updated_at = NOW();
-            `;
-            await client.query(query, [floor, type, intensity, onTime, offTime, enabled]);
-
-            // รีเซ็ตสถานะ Manual Override เมื่อมีการบันทึก Schedule
-            const key = `${floor}-${type}`;
-            if (currentLightState[key]) {
-                currentLightState[key].isManuallyOverridden = false;
-            }
-        }
-
-        await client.query('COMMIT'); // TRANSACTION END (SAVE)
-        console.log(`✅ Batch updated ${schedules.length} schedules successfully.`);
-
-        await loadSchedulesFromDB(); // โหลดข้อมูลใหม่ทั้งหมดเข้าหน่วยความจำ **เพียงครั้งเดียว**
-
-        res.json({ message: 'บันทึกตารางเวลาทั้งหมดสำเร็จ' });
-
-    } catch (err) {
-        await client.query('ROLLBACK'); // TRANSACTION END (CANCEL)
-        console.error('❌ Error in batch schedule update:', err);
-        res.status(500).json({ error: 'เกิดข้อผิดพลาดในการบันทึกข้อมูล' });
-    } finally {
-        client.release(); // คืนการเชื่อมต่อให้ Pool
-    }
-});
-
-// NEW API: GET /api/lights/status - Frontend polls this to get current light states
-app.get('/api/lights/status', (req, res) => {
-    res.json(currentLightState); // Send the Backend's current state to Frontend
-});
-
-// ===============================================
-// ✅ INITIALIZE SCHEDULER & LOAD DATA (ON SERVER START)
-// ===============================================
-// Load schedules from DB once when server starts
-loadSchedulesFromDB(); 
-// Start the scheduler loop in the backend
-startAutomaticLightScheduler();
-
-
-
-
-// API สำหรับบันทึกค่าที่เปลี่ยนแปลง (Pending) ลง DB
-app.post('/api/lights/pending', async (req, res) => {
-    const { userId, floor, type, intensity } = req.body;
-    try {
-        // ใช้ "UPSERT" logic: ถ้ามีข้อมูลเดิมอยู่แล้วให้อัปเดต, ถ้าไม่มีให้เพิ่มใหม่
-        const query = `
-            INSERT INTO light_pending_changes (user_id, floor, type, intensity)
-            VALUES ($1, $2, $3, $4)
-            ON CONFLICT (user_id, floor, type) DO UPDATE SET
-                intensity = EXCLUDED.intensity,
-                created_at = NOW();
-        `;
-        await pool.query(query, [userId, floor, type, intensity]);
-        res.status(200).json({ message: 'Pending change saved.' });
-    } catch (err) {
-        console.error('❌ Error saving pending change:', err);
-        res.status(500).json({ error: 'Server error' });
-    }
-});
-
-// API สำหรับดึงค่าที่ค้างอยู่ทั้งหมดของผู้ใช้
-app.get('/api/lights/pending', async (req, res) => {
-    const { userId } = req.query;
-    try {
+        // ดึงข้อมูลโคมไฟ
         const { rows } = await pool.query(
-            'SELECT floor, type, intensity FROM light_pending_changes WHERE user_id = $1',
-            [userId]
+            'SELECT floor FROM light_control_lights WHERE light_id = $1',
+            [lightId]
         );
-        res.json(rows);
-    } catch (err) {
-        console.error('❌ Error fetching pending changes:', err);
-        res.status(500).json({ error: 'Server error' });
+
+        if (rows.length === 0) {
+            return res.status(404).json({ error: 'ไม่พบโคมไฟที่ระบุ' });
+        }
+
+        const floor = rows[0].floor;
+        const finalIntensity = isOn ? intensity : 0;
+
+        // ส่งคำสั่ง Modbus
+        sendModbusCommand(mqttClient, floor, lightId, deviceType, finalIntensity);
+
+        // บันทึกสถานะลง Database
+        await pool.query(
+            `UPDATE light_control_devices
+             SET is_on = $1, intensity = $2, updated_at = NOW()
+             WHERE light_id = $3 AND device_type = $4`,
+            [isOn, intensity, lightId, deviceType]
+        );
+
+        res.json({
+            message: 'ส่งคำสั่งสำเร็จ',
+            lightId,
+            deviceType,
+            intensity: finalIntensity
+        });
+
+    } catch (error) {
+        console.error('❌ Error controlling light:', error);
+        res.status(500).json({ error: 'เกิดข้อผิดพลาดในการควบคุมไฟ' });
     }
 });
 
-// API สำหรับลบค่าที่ค้างอยู่ของชั้นนั้นๆ (หลังจากกดยืนยันแล้ว)
-app.delete('/api/lights/pending/:floor', async (req, res) => {
-    const { floor } = req.params;
-    const { userId } = req.body; // รับ userId จาก body เพื่อความปลอดภัย
+// POST /api/light-control/schedule - อัพเดทตารางเวลา
+app.post('/api/light-control/schedule', async (req, res) => {
+    const { lightId, deviceType, scheduleEnabled, scheduleOnTime, scheduleOffTime, intensity } = req.body;
+
     try {
         await pool.query(
-            'DELETE FROM light_pending_changes WHERE user_id = $1 AND floor = $2',
-            [userId, floor]
+            `UPDATE light_control_devices
+             SET schedule_enabled = $1,
+                 schedule_on_time = $2,
+                 schedule_off_time = $3,
+                 intensity = $4,
+                 updated_at = NOW()
+             WHERE light_id = $5 AND device_type = $6`,
+            [scheduleEnabled, scheduleOnTime, scheduleOffTime, intensity, lightId, deviceType]
         );
-        res.status(200).json({ message: 'Pending changes cleared for floor.' });
-    } catch (err) {
-        console.error('❌ Error deleting pending changes:', err);
-        res.status(500).json({ error: 'Server error' });
+
+        res.json({ message: 'บันทึกตารางเวลาสำเร็จ' });
+
+    } catch (error) {
+        console.error('❌ Error updating schedule:', error);
+        res.status(500).json({ error: 'เกิดข้อผิดพลาดในการบันทึกตารางเวลา' });
     }
 });
 
+// POST /api/light-control/debug - เครื่องมือทดสอบ Modbus
+app.post('/api/light-control/debug', async (req, res) => {
+    const { slaveId, functionCode, registerAddress, value } = req.body;
 
+    try {
+        const slave = new ModbusSlave(slaveId);
+        let modbusFrame;
+
+        if (functionCode === 0x03 || functionCode === 0x04) {
+            // Read operation
+            modbusFrame = slave.modbusRTUGenerator(functionCode, registerAddress, 1);
+        } else {
+            // Write operation
+            modbusFrame = slave.modbusWriteRTUGenerator(functionCode, registerAddress, value);
+        }
+
+        const hexString = modbusFrame.map(b => b.toString(16).padStart(2, '0')).join('');
+
+        const mqttPayload = JSON.stringify({
+            slaveId,
+            register: registerAddress,
+            value: value || 0,
+            modbusFrame: hexString,
+            debug: true,
+            timestamp: new Date().toISOString()
+        });
+
+        mqttClient.publish(LIGHT_CONTROL_CONFIG.MQTT_TOPIC, mqttPayload);
+
+        res.json({
+            message: 'ส่งคำสั่งทดสอบสำเร็จ',
+            modbusFrame: hexString,
+            payload: mqttPayload
+        });
+
+    } catch (error) {
+        console.error('❌ Error in debug command:', error);
+        res.status(500).json({ error: 'เกิดข้อผิดพลาดในการส่งคำสั่งทดสอบ' });
+    }
+});
 
 app.post('/api/planting/receive', async (req, res) => {
   const {
@@ -3530,54 +3748,87 @@ app.post('/api/planting/receive', async (req, res) => {
     plant_count,       // ✅ ถูกต้อง
     level_required,    // ✅ เพิ่มใหม่
     notes,
+
     // ✅ เพิ่มข้อมูลเพิ่มเติมที่อาจส่งมา
     variety = '',
     batch_number = '',
     source_system = 'civic_platform',
     priority = 'normal',
-    created_by = 'civic_system'
+    created_by = 'civic_system',
+
+    // ✅ เพิ่มค่า EC / pH ที่ส่งมา (อาจมีหรือไม่มีก็ได้)
+   
   } = req.body;
 
   console.log('📥 รับข้อมูลแผนการปลูก:', req.body);
   
-  // ✅ แก้ไขการตรวจสอบให้ใช้ external_plan_id
   if (!external_plan_id || !vegetable_type || !plant_date || !harvest_date || !plant_count) {
     return res.status(400).json({
       success: false,
       error: 'ข้อมูลไม่ครบถ้วน ต้องมี: external_plan_id, vegetable_type, plant_date, harvest_date, plant_count'
     });
   }
-  
+
+  const client = await pool.connect();
+
   try {
-    // ✅ บันทึกข้อมูลแผนการปลูกพร้อมข้อมูลครบถ้วน
-    const result = await pool.query(
+    await client.query('BEGIN');
+
+    // ✅ 1. บันทึกลง planting_plans
+    const insertPlan = await client.query(
       `INSERT INTO planting_plans (
         plan_id, vegetable_type, plant_date, harvest_date, 
         plant_count, level_required, notes, status
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'received') 
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'received')
        RETURNING *`,
-      [external_plan_id, vegetable_type, plant_date, harvest_date, plant_count, level_required || 1, notes || '']
+      [
+        external_plan_id,
+        vegetable_type,
+        plant_date,
+        harvest_date,
+        plant_count,
+        level_required || 1,
+        notes || ''
+      ]
     );
-    
-    console.log('✅ บันทึกสำเร็จ:', result.rows[0]);
-    
-    res.json({ 
+
+    const plan = insertPlan.rows[0];
+
+    // ✅ 2. ถ้ามีค่า ec_value หรือ ph_value → บันทึกลง environment_logs
+    if (ec_value !== null || ph_value !== null) {
+      await client.query(
+        `INSERT INTO environment_logs (
+          plan_id, ec_value, ph_value, logged_at
+        ) VALUES ($1, $2, $3, NOW())`,
+        [external_plan_id, ec_value, ph_value]
+      );
+    }
+
+    await client.query('COMMIT');
+
+    console.log('✅ บันทึกแผนและสภาพแวดล้อมสำเร็จ:', plan);
+
+    res.json({
       success: true,
       message: "บันทึกแผนการปลูกสำเร็จ",
-      data: result.rows[0]
+      data: plan
     });
-    
+
   } catch (err) {
+    await client.query('ROLLBACK');
     console.error('❌ Error:', err.message);
     console.error('❌ Detail:', err.detail);
     console.error('❌ Code:', err.code);
-    
-    res.status(500).json({ 
+
+    res.status(500).json({
       success: false,
       error: err.message,
       detail: err.detail,
       code: err.code
     });
+
+  } finally {
+    client.release();
   }
 });
 
@@ -3626,11 +3877,12 @@ app.post('/api/planting/plan/:id/quick-inbound-wo', async (req, res) => {
   const { created_by } = req.body;
 
   try {
-    // ✨✨✨ [จุดแก้ไขที่ 1] เพิ่ม `notes` เข้าไปใน SELECT statement ✨✨✨
+    //  ดึงข้อมูล planting plan รวมฟิลด์ระบบน้ำและค่า EC, pH, water_close_date
     const planResult = await pool.query(`
-      SELECT id, plan_id, vegetable_type, plant_date, harvest_date, 
-             plant_count, level_required, status, notes 
-      FROM planting_plans 
+      SELECT id, plan_id, vegetable_type, plant_date, harvest_date,
+             plant_count, level_required, status, notes,
+             water_system, ec_value, ph_value, water_close_date
+      FROM planting_plans
       WHERE id = $1
     `, [planting_plan_id]);
     
@@ -3640,21 +3892,35 @@ app.post('/api/planting/plan/:id/quick-inbound-wo', async (req, res) => {
     
     const plan = planResult.rows[0];
     const workOrderNumber = `WO-${new Date().getFullYear()}-${Date.now().toString().slice(-5)}`;
-    
+
+    // 🌊 คำนวณวันปิดน้ำอัตโนมัติ (2 วันก่อนเก็บเกี่ยว) สำหรับระบบน้ำเวียน
+    let waterCloseDate = plan.water_close_date;
+    if (!waterCloseDate && plan.harvest_date && (plan.water_system === 'circulating' || plan.water_system === 'circulation' || plan.water_system === 'น้ำเวียน')) {
+      const harvestDate = new Date(plan.harvest_date);
+      harvestDate.setDate(harvestDate.getDate() - 2); // ลบ 2 วัน
+      waterCloseDate = harvestDate;
+      console.log(`📅 คำนวณวันปิดน้ำอัตโนมัติ: ${waterCloseDate.toISOString().split('T')[0]} (2 วันก่อนเก็บเกี่ยว)`);
+    }
+
     const result = await pool.query(`
       INSERT INTO work_orders (
-        work_order_number, planting_plan_id, task_type, vegetable_type, 
-        plant_count, level, target_date, created_by, status
-      ) VALUES ($1, $2, 'inbound', $3, $4, $5, $6, $7, 'pending') 
+        work_order_number, planting_plan_id, task_type, vegetable_type,
+        plant_count, level, target_date, created_by, status,
+        water_system, ec_value, ph_value, water_close_date
+      ) VALUES ($1, $2, 'inbound', $3, $4, $5, $6, $7, 'pending', $8, $9, $10, $11)
       RETURNING *
     `, [
-      workOrderNumber, 
-      planting_plan_id, 
+      workOrderNumber,
+      planting_plan_id,
       plan.vegetable_type,
       plan.plant_count,
       plan.level_required,
       plan.plant_date,
-      created_by || 'system'
+      created_by || 'system',
+      plan.water_system,
+      plan.ec_value,
+      plan.ph_value,
+      waterCloseDate
     ]);
     
     res.status(201).json({
@@ -3668,9 +3934,13 @@ app.post('/api/planting/plan/:id/quick-inbound-wo', async (req, res) => {
           plant_count: plan.plant_count,
           plant_date: plan.plant_date,
           harvest_date: plan.harvest_date,
-          // ✨✨✨ [จุดแก้ไขที่ 2] ตรวจสอบให้แน่ใจว่า `plan.notes` ถูกส่งไปจริงๆ ✨✨✨
-          notes: plan.notes, 
-          planting_plan_id: planting_plan_id
+          notes: plan.notes,
+          planting_plan_id: planting_plan_id,
+          //  🌊 เพิ่มข้อมูลระบบน้ำและค่า EC, pH, water_close_date (ที่คำนวณแล้ว)
+          water_system: plan.water_system,
+          ec_value: plan.ec_value,
+          ph_value: plan.ph_value,
+          water_close_date: waterCloseDate // ใช้ waterCloseDate ที่คำนวณแล้ว
         }
       },
       message: `สร้างใบงาน ${workOrderNumber} สำเร็จ`
@@ -3727,22 +3997,33 @@ app.post('/api/planting/plan/:planId/quick-outbound-wo', async (req, res) => {
     }
     
     const tray = trayResult.rows[0];
-    
+
     // สร้างเลขใบงาน
     const workOrderNumber = `WO-OUT-${Date.now().toString().slice(-8)}`;
-    
+
+    // 🌊 คำนวณวันปิดน้ำอัตโนมัติ (2 วันก่อนเก็บเกี่ยว) สำหรับระบบน้ำเวียน
+    let waterCloseDate = plan.water_close_date;
+    if (!waterCloseDate && plan.harvest_date && (plan.water_system === 'circulating' || plan.water_system === 'circulation' || plan.water_system === 'น้ำเวียน')) {
+      const harvestDate = new Date(plan.harvest_date);
+      harvestDate.setDate(harvestDate.getDate() - 2); // ลบ 2 วัน
+      waterCloseDate = harvestDate;
+      console.log(`📅 คำนวณวันปิดน้ำอัตโนมัติ (Outbound): ${waterCloseDate.toISOString().split('T')[0]} (2 วันก่อนเก็บเกี่ยว)`);
+    }
+
     // สร้างใบงาน outbound
     const workOrderResult = await pool.query(`
       INSERT INTO work_orders (
-        work_order_number, planting_plan_id, task_type, vegetable_type, 
-        level, plant_count, target_date, created_by, status, tray_id, 
-        current_floor, current_slot, created_at
-      ) VALUES ($1, $2, 'outbound', $3, $4, $5, $6, $7, 'pending', $8, $9, $10, NOW())
+        work_order_number, planting_plan_id, task_type, vegetable_type,
+        level, plant_count, target_date, created_by, status, tray_id,
+        current_floor, current_slot, created_at,
+        water_system, ec_value, ph_value, water_close_date
+      ) VALUES ($1, $2, 'outbound', $3, $4, $5, $6, $7, 'pending', $8, $9, $10, NOW(), $11, $12, $13, $14)
       RETURNING *
     `, [
-      workOrderNumber, planId, plan.vegetable_type, 
-      plan.level_required, plan.plant_count, plan.harvest_date, 
-      created_by || 'system', tray.tray_id, tray.floor, tray.slot
+      workOrderNumber, planId, plan.vegetable_type,
+      plan.level_required, plan.plant_count, plan.harvest_date,
+      created_by || 'system', tray.tray_id, tray.floor, tray.slot,
+      plan.water_system, plan.ec_value, plan.ph_value, waterCloseDate
     ]);
     
     const workOrder = workOrderResult.rows[0];
@@ -3829,11 +4110,11 @@ app.post('/api/trays/:tray_id/quick-outbound-wo', async (req, res) => {
 // ✅ 5. แก้ไข API ดึงรายการ Work Orders (ใช้ View ใหม่)
 app.get('/api/work-orders', async (req, res) => {
   try {
-    const { status, task_type } = req.query;
-    
+    const { status, task_type, station } = req.query;
+
     // ✅ แก้ไขให้ใช้ JOIN แทน View ที่ขาดหายไป
     let query = `
-      SELECT 
+      SELECT
         wo.*,
         pp.plan_id,
         pp.vegetable_type as plan_vegetable_type
@@ -3842,12 +4123,17 @@ app.get('/api/work-orders', async (req, res) => {
       WHERE 1=1
     `;
     const params = [];
-    
+
+    if (station) {
+      params.push(parseInt(station));
+      query += ` AND wo.station_id = $${params.length}`;
+    }
+
     if (status) {
       params.push(status);
       query += ` AND wo.status = $${params.length}`;
     }
-    
+
     if (task_type) {
       params.push(task_type);
       query += ` AND wo.task_type = $${params.length}`;
@@ -3959,7 +4245,7 @@ app.post('/api/inbound/complete', async (req, res) => {
     }
     const workOrder = updateResult.rows[0];
 
-    // ✅✅✅ [เพิ่มส่วนนี้] อัปเดตสถานะ Planting Plan เป็น 'in_progress' ✅✅✅
+    //   อัปเดตสถานะ Planting Plan เป็น 'in_progress' 
     if (workOrder.planting_plan_id) {
       await pool.query(`
         UPDATE planting_plans SET status = 'in_progress', updated_at = NOW()
@@ -4142,7 +4428,7 @@ app.get('/api/planting/dashboard-stats', async (req, res) => {
 });
 
 // =============================================================================
-// 🎯 สรุปการเปลี่ยนแปลง API:
+//  สรุปการเปลี่ยนแปลง API:
 // =============================================================================
 /*
 ✅ 1. /api/planting/pending-inbound-tasks → ใช้ v_pending_tasks View
@@ -4166,7 +4452,7 @@ app.get('/api/planting-plans/complete-history', async (req, res) => {
     
     // ดึงข้อมูล Planting Plans ที่เสร็จสิ้น
     const completedPlansQuery = `
-      SELECT 
+      SELECT
         'planting_plan' as source_type,
         pp.id,
         pp.plan_id,
@@ -4182,6 +4468,8 @@ app.get('/api/planting-plans/complete-history', async (req, res) => {
         pp.completed_at,
         pp.created_at,
         pp.updated_at,
+        pp.water_system,
+        pp.water_close_date,
         wo.work_order_number as command_used,
         'completed' as action_type
       FROM planting_plans pp
@@ -4191,7 +4479,7 @@ app.get('/api/planting-plans/complete-history', async (req, res) => {
     
     // ดึงข้อมูล Outbound Actions (เก็บเกี่ยว + กำจัดทิ้ง)
     const outboundActionsQuery = `
-      SELECT 
+      SELECT
         'outbound_action' as source_type,
         tm.task_id as id,
         CONCAT('OUT-', tm.task_id) as plan_id,
@@ -4207,13 +4495,15 @@ app.get('/api/planting-plans/complete-history', async (req, res) => {
         tm.completed_at,
         tm.created_at,
         tm.created_at as updated_at,
+        ti.water_system as water_system,
+        NULL as water_close_date,
         COALESCE(wo.work_order_number, CONCAT('MANUAL-', tm.task_id)) as command_used,
         tm.reason as action_type
       FROM task_monitor tm
       LEFT JOIN tray_inventory ti ON tm.tray_id = ti.tray_id
       LEFT JOIN planting_plans pp ON ti.planting_plan_id = pp.id
       LEFT JOIN work_orders wo ON tm.work_order_id = wo.id
-      WHERE tm.action_type = 'outbound' 
+      WHERE tm.action_type = 'outbound'
         AND tm.status = 'success'
         AND tm.reason IN ('เก็บเกี่ยวทั้งหมด', 'ตัดแต่ง / เก็บเกี่ยวบางส่วน', 'กำจัดทิ้ง')
     `;
@@ -4289,75 +4579,67 @@ app.get('/api/planting-plans/:id/details', async (req, res) => {
     
     const plan = planResult.rows[0];
     
-    // ดึงข้อมูลถาดที่เกี่ยวข้อง - ปรับปรุงให้หาข้อมูลมากขึ้น
+    // ✅ ดึงข้อมูลถาดที่เกี่ยวข้องกับ plan นี้เท่านั้น
     const traysResult = await pool.query(`
-      SELECT 
+      SELECT
         ti.*,
         to_char(ti.time_in, 'DD/MM/YYYY HH24:MI') as time_in_formatted,
         to_char(ti.seeding_date, 'DD/MM/YYYY') as seeding_date_formatted
-      FROM tray_inventory ti 
+      FROM tray_inventory ti
       WHERE ti.planting_plan_id = $1
-         OR (ti.veg_type = $2 AND ti.status IN ('on_shelf', 'picked'))
       ORDER BY ti.tray_id
       LIMIT 50
-    `, [plan.id, plan.vegetable_type]); // 👈 หาทั้งจาก plan_id และ vegetable_type
+    `, [plan.id]);
     
-    // ดึง task history ที่เกี่ยวข้อง - ปรับปรุงให้หาข้อมูลมากขึ้น
+    // ✅ ดึง task history ที่เกี่ยวข้องกับ plan นี้เท่านั้น (ผ่าน tray_id และ work_order_id)
     const taskHistoryResult = await pool.query(`
       SELECT tm.*,
         to_char(tm.created_at, 'DD/MM/YYYY HH24:MI') as created_at_formatted
       FROM task_monitor tm
-      WHERE (
-        tm.tray_id IN (
-          SELECT ti.tray_id FROM tray_inventory ti WHERE ti.planting_plan_id = $1
-        )
-        OR tm.veg_type = $2
-        OR (
-          tm.action_type = 'outbound' 
-          AND tm.status = 'success'
-        )
-      )
+      WHERE tm.tray_id IN (
+              SELECT ti.tray_id FROM tray_inventory ti WHERE ti.planting_plan_id = $1
+            )
+         OR tm.work_order_id IN (
+              SELECT wo.id FROM work_orders wo WHERE wo.planting_plan_id = $1
+            )
       ORDER BY tm.created_at DESC
       LIMIT 100
-    `, [plan.id, plan.vegetable_type]);
+    `, [plan.id]);
 
-    // ดึงข้อมูล work orders ที่เกี่ยวข้อง - ปรับปรุงให้หาข้อมูลมากขึ้น
+    // ✅ ดึงข้อมูล work orders ที่เกี่ยวข้องกับ planting_plan นี้เท่านั้น
     const workOrdersResult = await pool.query(`
-      SELECT 
+      SELECT
         wo.*,
         to_char(wo.target_date, 'DD/MM/YYYY') as target_date_formatted,
         to_char(wo.created_at, 'DD/MM/YYYY HH24:MI') as created_at_formatted
-      FROM work_orders wo 
+      FROM work_orders wo
       WHERE wo.planting_plan_id = $1
-         OR (wo.vegetable_type = $2 AND wo.status IN ('pending', 'completed', 'in_progress'))
       ORDER BY wo.created_at DESC
       LIMIT 30
-    `, [plan.id, plan.vegetable_type]); // 👈 หาทั้งจาก plan_id และ vegetable_type
-    
+    `, [plan.id]); // ✅ ดึงเฉพาะ work orders ที่เชื่อมกับ plan นี้เท่านั้น
+
     // คำนวณสถิติจากข้อมูลจริง
     const directTrays = traysResult.rows.filter(tray => tray.planting_plan_id == plan.id);
-    const relatedTrays = traysResult.rows.filter(tray => tray.veg_type === plan.vegetable_type);
-    const directWorkOrders = workOrdersResult.rows.filter(wo => wo.planting_plan_id == plan.id);
-    const relatedWorkOrders = workOrdersResult.rows.filter(wo => wo.vegetable_type === plan.vegetable_type);
-    
+    const directWorkOrders = workOrdersResult.rows;
+
     const stats = {
-      total_trays: directTrays.length > 0 ? directTrays.length : relatedTrays.length,
-      total_plants: directTrays.length > 0 
-        ? directTrays.reduce((sum, tray) => sum + (tray.plant_quantity || 0), 0)
-        : relatedTrays.reduce((sum, tray) => sum + (tray.plant_quantity || 0), 0),
-      work_orders_count: directWorkOrders.length > 0 ? directWorkOrders.length : relatedWorkOrders.length,
-      pending_work_orders: (directWorkOrders.length > 0 ? directWorkOrders : relatedWorkOrders).filter(wo => wo.status === 'pending').length,
-      completed_work_orders: (directWorkOrders.length > 0 ? directWorkOrders : relatedWorkOrders).filter(wo => wo.status === 'completed').length,
-      // เพิ่มข้อมูลการประมาณจาก task history
-      estimated_activity: taskHistoryResult.rows.filter(task => task.veg_type === plan.vegetable_type).length
+      total_trays: directTrays.length,
+      total_plants: directTrays.reduce((sum, tray) => sum + (tray.plant_quantity || 0), 0) || plan.plant_count,
+      work_orders_count: directWorkOrders.length,
+      pending_work_orders: directWorkOrders.filter(wo => wo.status === 'pending').length,
+      completed_work_orders: directWorkOrders.filter(wo => wo.status === 'completed').length,
+      estimated_activity: taskHistoryResult.rows.filter(task =>
+        task.plan_id === plan.plan_id ||
+        taskHistoryResult.rows.some(t => directTrays.some(tray => tray.tray_id === t.tray_id))
+      ).length
     };
 
     res.json({
       success: true,
       plan: plan,
-      trays: traysResult.rows,
-      tray_inventory: traysResult.rows, // alias สำหรับ compatibility
-      work_orders: workOrdersResult.rows,
+      trays: directTrays, // ✅ ส่งเฉพาะถาดที่เชื่อมกับ plan นี้
+      tray_inventory: directTrays, // alias สำหรับ compatibility
+      work_orders: directWorkOrders, // ✅ ส่งเฉพาะ work orders ที่เชื่อมกับ plan นี้
       task_history: taskHistoryResult.rows,
       stats: stats
     });
@@ -4569,33 +4851,47 @@ app.get('/api/task-monitor/outbound-stats', async (req, res) => {
 // ✅✅✅ [เพิ่มใหม่] API สำหรับหน้า Overview เพื่อเช็คสถานะ Sensor (เฉพาะ RGV 3 ตัว) ✅✅✅
 app.get('/api/sensors', async (req, res) => {
   try {
-    const stationId = req.query.station_id || 1;
+    const stationId = req.query.station_id;
     const state = stationStates[stationId];
     
     // ดึงข้อมูลล่าสุดจาก State ที่ได้รับผ่าน MQTT
     const sensorData = state?.latestAgvSensorStatus || {};
 
-    // ส่งข้อมูล sensor ทั้งหมดสำหรับหน้า monitor sensor
-    // ส่งข้อมูล sensor ทั้งหมด (lift และ AGV ที่มีอยู่แล้ว)
-    res.json({
-      // RGV sensors
-      tray_sensor: sensorData.tray_sensor || false,
-      pos_sensor1: sensorData.pos_sensor1 || false,
-      pos_sensor2: sensorData.pos_sensor2 || false,
-      limit_agv_1: sensorData.limit_agv_1 || false,
-      limit_agv_2: sensorData.limit_agv_2 || false,
-      agv_on: sensorData.agv_on || false,
-      
-      // Lift sensors
-      gripper_f1: sensorData.gripper_f1 || false,
-      gripper_f2: sensorData.gripper_f2 || false,
-      gripper_f3: sensorData.gripper_f3 || false,
-      gripper_f4: sensorData.gripper_f4 || false,
-      gripper_f5: sensorData.gripper_f5 || false,
-      limit_top: sensorData.limit_top || false,
-      limit_bottom: sensorData.limit_bottom || false,
-      emergency_btn: sensorData.emergency_btn || false
-    });
+    // ✅ ใช้ข้อมูลจริงจาก MQTT เท่านั้น - หากไม่มีข้อมูลแสดงว่าไม่ได้เชื่อมต่อ
+    const hasRealData = Object.keys(sensorData).length > 0;
+    
+    if (hasRealData) {
+      // ส่งข้อมูลจริงที่ได้รับจาก MQTT
+      res.json({
+        // RGV sensors
+        tray_sensor: sensorData.tray_sensor || false,
+        pos_sensor1: sensorData.pos_sensor1 || false,
+        pos_sensor2: sensorData.pos_sensor2 || false,
+        limit_agv_1: sensorData.limit_agv_1 || false,
+        limit_agv_2: sensorData.limit_agv_2 || false,
+        agv_on: sensorData.agv_on || false,
+        
+        // Lift sensors
+        gripper_f1: sensorData.gripper_f1 || false,
+        gripper_f2: sensorData.gripper_f2 || false,
+        gripper_f3: sensorData.gripper_f3 || false,
+        gripper_f4: sensorData.gripper_f4 || false,
+        gripper_f5: sensorData.gripper_f5 || false,
+        limit_top: sensorData.limit_top || false,
+        limit_bottom: sensorData.limit_bottom || false,
+        emergency_btn: sensorData.emergency_btn || false,
+        _status: 'real_data',
+        _last_update: new Date().toISOString()
+      });
+    } else {
+      // ไม่มีข้อมูลจาก MQTT = อุปกรณ์ไม่ได้เชื่อมต่อ
+      res.status(503).json({
+        error: 'No sensor data available',
+        message: 'AGV/RGV hardware not connected to MQTT broker',
+        _status: 'no_hardware_connection',
+        _last_checked: new Date().toISOString()
+      });
+    }
 
   } catch (error) {
     console.error('❌ Error in /api/sensors (RGV 3-sensor):', error.message);
@@ -4608,7 +4904,7 @@ app.get('/api/sensors', async (req, res) => {
 // ✅ AIR QUALITY SENSOR API ENDPOINT
 app.get('/api/air-quality', async (req, res) => {
   try {
-    const stationId = req.query.station_id || 1;
+    const stationId = req.query.station_id;
     const limit = parseInt(req.query.limit) || 1; // จำนวนข้อมูลที่ต้องการ (ค่าเริ่มต้น: ข้อมูลล่าสุด 1 รายการ)
     
     // ดึงข้อมูลจากฐานข้อมูล
@@ -4675,6 +4971,42 @@ app.get('/api/air-quality', async (req, res) => {
 });
 
 // ✅ WATER SYSTEM DATABASE API ENDPOINTS
+// GET water system status (สำหรับ Overview)
+app.get('/api/water/status', async (req, res) => {
+  try {
+    const { station } = req.query;
+
+    // ดึงข้อมูลวาล์วทั้งหมด
+    const valvesResult = await pool.query(`
+      SELECT valve_id, status
+      FROM water_valves
+      ORDER BY floor_id, valve_id
+    `);
+
+    // ดึงสถานะระบบน้ำ
+    const settingsResult = await pool.query(`
+      SELECT is_active
+      FROM water_system_settings
+      ORDER BY id DESC LIMIT 1
+    `);
+
+    const isSystemActive = settingsResult.rows[0]?.is_active || false;
+    const valves = valvesResult.rows.map(v => ({
+      id: v.valve_id,
+      status: v.status
+    }));
+
+    res.json({
+      status: isSystemActive ? 'active' : 'idle',
+      valves: valves,
+      timestamp: new Date()
+    });
+  } catch (error) {
+    console.error('❌ Error fetching water status:', error);
+    res.status(500).json({ error: 'Failed to fetch water status' });
+  }
+});
+
 // GET water system data from database
 app.get('/api/water-system', async (req, res) => {
   try {
