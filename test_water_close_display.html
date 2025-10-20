@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ทดสอบแสดงวันปิดน้ำ - แท็บกำลังทำ</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Sarabun', 'Prompt', sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            padding: 40px 20px;
+            min-height: 100vh;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        h1 {
+            text-align: center;
+            color: white;
+            margin-bottom: 30px;
+            font-size: 2em;
+            text-shadow: 0 2px 10px rgba(0,0,0,0.2);
+        }
+
+        .tasks-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
+            gap: 20px;
+            width: 100%;
+        }
+
+        .task-card {
+            background: linear-gradient(135deg, #ffffff 0%, #fafbfc 100%);
+            border-radius: 16px;
+            padding: 24px;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.08);
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            word-wrap: break-word;
+            overflow-wrap: break-word;
+            hyphens: auto;
+            line-height: 1.5;
+        }
+
+        .task-card:hover {
+            box-shadow: 0 12px 40px rgba(0,0,0,0.12);
+            transform: translateY(-4px) scale(1.02);
+        }
+
+        .overdue {
+            border-left: 6px solid #dc3545;
+            border-top: 3px solid #dc3545;
+        }
+
+        .normal {
+            border-left: 6px solid #20c997;
+            border-top: 3px solid #20c997;
+        }
+
+        .task-actions button {
+            background: linear-gradient(135deg, #17a2b8, #138496);
+            color: white;
+            border: none;
+            padding: 12px 20px;
+            border-radius: 10px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            flex: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            font-size: 13px;
+        }
+
+        .task-actions button:hover {
+            transform: translateY(-2px);
+        }
+
+        .highlight-box {
+            background: linear-gradient(135deg, #fff3cd, #fff);
+            padding: 8px 12px;
+            border-radius: 8px;
+            border: 2px solid #ffc107;
+            box-shadow: 0 2px 8px rgba(255, 193, 7, 0.3);
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% {
+                box-shadow: 0 2px 8px rgba(255, 193, 7, 0.3);
+            }
+            50% {
+                box-shadow: 0 4px 16px rgba(255, 193, 7, 0.5);
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1><i class="fas fa-seedling"></i> ทดสอบการแสดงวันปิดน้ำ - แท็บกำลังทำ</h1>
+
+        <div class="tasks-grid" id="tasksContainer">
+            <!-- การ์ดจะถูกสร้างด้วย JavaScript -->
+        </div>
+    </div>
+
+    <script>
+        // ฟังก์ชันช่วยเหลือ
+        function formatDateThai(dateStr) {
+            if (!dateStr) return 'ไม่ระบุ';
+            const date = new Date(dateStr);
+            const thaiMonths = ['ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.',
+                               'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'];
+            return `${date.getDate()} ${thaiMonths[date.getMonth()]} ${date.getFullYear() + 543}`;
+        }
+
+        function calculateTrayAge(timeIn) {
+            if (!timeIn) return '0 วัน';
+            const now = new Date();
+            const start = new Date(timeIn);
+            const diff = now - start;
+
+            const days = Math.floor(diff / (1000 * 60 * 60 * 24));
+            const hours = Math.floor((diff % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
+            const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
+
+            return `${days} วัน ${hours} ชม. ${minutes} นาที`;
+        }
+
+        function getHarvestStatus(harvestDate) {
+            if (!harvestDate) return { color: '#6c757d', label: 'ไม่ระบุ', status: 'unknown' };
+
+            const today = new Date();
+            const harvest = new Date(harvestDate);
+            const diffDays = Math.ceil((harvest - today) / (1000 * 60 * 60 * 24));
+
+            if (diffDays < 0) return { color: '#dc3545', label: 'เลยกำหนด', status: 'overdue' };
+            if (diffDays <= 3) return { color: '#fd7e14', label: 'ใกล้ถึงกำหนด', status: 'urgent' };
+            if (diffDays <= 7) return { color: '#ffc107', label: 'อีก ' + diffDays + ' วัน', status: 'soon' };
+            if (diffDays <= 14) return { color: '#20c997', label: 'อีก ' + diffDays + ' วัน', status: 'normal' };
+            return { color: '#007bff', label: 'อีก ' + diffDays + ' วัน', status: 'future' };
+        }
+
+        // ข้อมูล Mock
+        const mockTrays = [
+            {
+                tray_id: 'T-004',
+                veg_type: 'Frillice Iceberg',
+                floor: 2,
+                slot: 2,
+                time_in: '2025-09-19T00:00:00',
+                harvest_date: '2025-09-25T00:00:00',
+                batch_id: 'WO-190925-14',
+                username: 'IT',
+                plant_count: 50,
+                water_system: 'น้ำเวียน',
+                ec_value: 1.03,
+                ph_value: 7.50,
+                water_close_date: '2025-09-23T00:00:00', // ✅ มีวันปิดน้ำ
+                plan_notes: 'ID:241 ปลูก:2025-09-18 แสง:2025-09-19 อนุบาล1:2025-09-21 อนุบาล2:2025-09-22'
+            },
+            {
+                tray_id: 'T-005',
+                veg_type: 'Cos Lettuce',
+                floor: 1,
+                slot: 5,
+                time_in: '2025-10-10T00:00:00',
+                harvest_date: '2025-10-25T00:00:00',
+                batch_id: 'WO-101025-20',
+                username: 'Admin',
+                plant_count: 60,
+                water_system: 'น้ำเวียน',
+                ec_value: 1.15,
+                ph_value: 6.80,
+                water_close_date: '2025-10-22T00:00:00', // ✅ มีวันปิดน้ำ
+                plan_notes: 'ทดสอบระบบน้ำเวียนแบบใหม่'
+            },
+            {
+                tray_id: 'T-006',
+                veg_type: 'Kale',
+                floor: 3,
+                slot: 1,
+                time_in: '2025-10-12T00:00:00',
+                harvest_date: '2025-10-28T00:00:00',
+                batch_id: 'WO-121028-30',
+                username: 'User1',
+                plant_count: 40,
+                water_system: 'น้ำนิ่ง',
+                ec_value: 0.95,
+                ph_value: 7.00,
+                water_close_date: null, // ❌ ไม่มีวันปิดน้ำเพราะเป็นน้ำนิ่ง
+                plan_notes: 'ใช้ระบบน้ำนิ่ง'
+            }
+        ];
+
+        // สร้างการ์ด
+        function renderCards() {
+            const container = document.getElementById('tasksContainer');
+
+            const html = mockTrays.map(tray => {
+                const harvestStatus = getHarvestStatus(tray.harvest_date);
+                const realtimeAgeString = calculateTrayAge(tray.time_in);
+
+                return `
+                    <div class="task-card ${harvestStatus.status}" style="
+                        border-left: 6px solid ${harvestStatus.color};
+                        border-top: 3px solid ${harvestStatus.color};
+                    ">
+                        <div class="task-header" style="margin-bottom: 20px;">
+                            <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 12px; gap: 15px;">
+                                <div class="task-title" style="display: flex; align-items: flex-start; gap: 12px; flex: 1;">
+                                    <i class="fas fa-leaf" style="color: #28a745; font-size: 1.4em; margin-top: 2px;"></i>
+                                    <span style="font-weight: 700; font-size: 1.25em; color: #2d5aa0;">${tray.veg_type}</span>
+                                </div>
+                                <div class="harvest-status" style="
+                                    background: linear-gradient(135deg, ${harvestStatus.color}, ${harvestStatus.color}dd);
+                                    color: white;
+                                    padding: 6px 12px;
+                                    border-radius: 18px;
+                                    font-size: 11px;
+                                    font-weight: 700;
+                                    box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+                                    white-space: nowrap;
+                                ">
+                                    ${harvestStatus.label}
+                                </div>
+                            </div>
+                            <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 8px;">
+                                <div style="
+                                    font-size: 11px;
+                                    color: #5a6c7d;
+                                    background: linear-gradient(135deg, #e8f4fd, #d1ecf1);
+                                    padding: 6px 10px;
+                                    border-radius: 8px;
+                                    font-weight: 600;
+                                    border: 1px solid #bee5eb;
+                                ">
+                                    <i class="fas fa-map-marker-alt" style="color: #dc3545;"></i> ชั้น ${tray.floor} ช่อง ${tray.slot}
+                                </div>
+                                <div style="
+                                    font-size: 11px;
+                                    color: #5a6c7d;
+                                    background: linear-gradient(135deg, #f8f9fa, #e9ecef);
+                                    padding: 6px 10px;
+                                    border-radius: 8px;
+                                    font-weight: 600;
+                                    border: 1px solid #e0e6ed;
+                                ">
+                                    <i class="fas fa-tag" style="color: #6c757d;"></i> ${tray.tray_id}
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="task-details" style="margin-bottom: 20px;">
+                            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px;">
+                                <div style="
+                                    background: linear-gradient(135deg, #f8f9ff, #fff);
+                                    padding: 12px;
+                                    border-radius: 12px;
+                                    border: 1px solid #e3f2fd;
+                                    box-shadow: 0 2px 8px rgba(0,123,255,0.08);
+                                ">
+                                    <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 6px;">
+                                        <i class="fas fa-calendar-days" style="color: #007bff; font-size: 14px;"></i>
+                                        <span style="font-weight: 600; font-size: 12px; color: #495057;">วันที่วาง</span>
+                                    </div>
+                                    <div style="font-weight: 700; font-size: 13px; color: #007bff; margin-bottom: 4px;">
+                                        ${formatDateThai(tray.time_in)}
+                                    </div>
+                                    <div style="font-size: 11px; color: #6c757d;">
+                                        (${realtimeAgeString})
+                                    </div>
+                                </div>
+                                <div style="
+                                    background: linear-gradient(135deg, #f8fff9, #fff);
+                                    padding: 12px;
+                                    border-radius: 12px;
+                                    border: 1px solid #c8e6c9;
+                                    box-shadow: 0 2px 8px rgba(40,167,69,0.08);
+                                ">
+                                    <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 6px;">
+                                        <i class="fas fa-calendar-check" style="color: #28a745; font-size: 14px;"></i>
+                                        <span style="font-weight: 600; font-size: 12px; color: #495057;">กำหนดเก็บ</span>
+                                    </div>
+                                    <div style="font-weight: 700; font-size: 13px; color: #28a745;">
+                                        ${formatDateThai(tray.harvest_date)}
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="additional-info" style="
+                                background: linear-gradient(135deg, #f8f9fa, #ffffff);
+                                padding: 16px;
+                                border-radius: 12px;
+                                border: 1px solid #e9ecef;
+                                box-shadow: inset 0 1px 3px rgba(0,0,0,0.05);
+                            ">
+                                <div style="
+                                    display: grid;
+                                    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+                                    gap: 12px;
+                                    font-size: 12px;
+                                    line-height: 1.6;
+                                ">
+                                    <div><strong><i class="fas fa-seedling" style="color: #28a745;"></i> จำนวน:</strong> ${tray.plant_count} ต้น</div>
+                                    <div><strong><i class="fas fa-box" style="color: #6f42c1;"></i> Batch:</strong> ${tray.batch_id}</div>
+                                    <div><strong><i class="fas fa-user" style="color: #007bff;"></i> ผู้วาง:</strong> ${tray.username}</div>
+                                    <div><strong><i class="fas fa-clock" style="color: #ffc107;"></i> อายุถาด:</strong> ${realtimeAgeString}</div>
+                                </div>
+
+                                ${tray.water_system || tray.ec_value || tray.ph_value || tray.water_close_date ? `
+                                    <div style="margin-top: 12px; padding-top: 12px; border-top: 1px solid #dee2e6;">
+                                        <div style="
+                                            display: grid;
+                                            grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+                                            gap: 10px;
+                                            font-size: 12px;
+                                        ">
+                                            ${tray.water_system ? `
+                                                <div style="
+                                                    background: linear-gradient(135deg, #e3f2fd, #fff);
+                                                    padding: 8px 12px;
+                                                    border-radius: 8px;
+                                                    border: 1px solid #90caf9;
+                                                ">
+                                                    <strong><i class="fas fa-water" style="color: #1976d2;"></i> ระบบน้ำ:</strong>
+                                                    <span style="color: #1976d2; font-weight: 600;">${tray.water_system}</span>
+                                                </div>
+                                            ` : ''}
+
+                                            ${tray.ec_value ? `
+                                                <div style="
+                                                    background: linear-gradient(135deg, #fff3e0, #fff);
+                                                    padding: 8px 12px;
+                                                    border-radius: 8px;
+                                                    border: 1px solid #ffb74d;
+                                                ">
+                                                    <strong><i class="fas fa-bolt" style="color: #f57c00;"></i> EC:</strong>
+                                                    <span style="color: #f57c00; font-weight: 600;">${tray.ec_value} mS/cm</span>
+                                                </div>
+                                            ` : ''}
+
+                                            ${tray.ph_value ? `
+                                                <div style="
+                                                    background: linear-gradient(135deg, #e8f5e9, #fff);
+                                                    padding: 8px 12px;
+                                                    border-radius: 8px;
+                                                    border: 1px solid #81c784;
+                                                ">
+                                                    <strong><i class="fas fa-tint" style="color: #388e3c;"></i> pH:</strong>
+                                                    <span style="color: #388e3c; font-weight: 600;">${tray.ph_value}</span>
+                                                </div>
+                                            ` : ''}
+
+                                            ${tray.water_close_date && (tray.water_system === 'circulating' || tray.water_system === 'circulation' || tray.water_system === 'น้ำเวียน') ? `
+                                                <div class="highlight-box">
+                                                    <strong><i class="fas fa-calendar-times" style="color: #dc3545;"></i> วันปิดน้ำ:</strong>
+                                                    <span style="color: #dc3545; font-weight: 700;">${formatDateThai(tray.water_close_date)}</span>
+                                                </div>
+                                            ` : ''}
+                                        </div>
+                                    </div>
+                                ` : ''}
+
+                                ${tray.plan_notes ? `
+                                    <div style="margin-top: 12px; padding-top: 12px; border-top: 1px solid #dee2e6;">
+                                        <strong><i class="fas fa-sticky-note" style="color: #fd7e14;"></i> หมายเหตุ:</strong> ${tray.plan_notes}
+                                    </div>
+                                ` : ''}
+                            </div>
+                        </div>
+
+                        <div class="task-actions" style="display: flex; gap: 12px;">
+                            <button style="background: linear-gradient(135deg, #17a2b8, #138496);">
+                                <i class="fas fa-eye"></i> ดูรายละเอียด
+                            </button>
+                            <button style="background: linear-gradient(135deg, #28a745, #20c997);">
+                                <i class="fas fa-arrow-right"></i> ไป Outbound
+                            </button>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+
+            container.innerHTML = html;
+        }
+
+        // เรนเดอร์เมื่อโหลดหน้า
+        renderCards();
+
+        // อัปเดตเวลาทุก 1 นาที
+        setInterval(renderCards, 60000);
+    </script>
+</body>
+</html>

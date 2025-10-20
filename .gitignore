@@ -1,0 +1,57 @@
+# Dependencies
+node_modules/
+
+# Environment variables (ข้อมูลสำคัญ - ห้าม upload!)
+.env
+.env.local
+.env.production
+
+# Logs
+*.log
+server.log
+
+# Test & Debug files
+test_*.js
+check_*.js
+create_test_*.js
+debug_*.js
+verify_*.js
+fix_*.js
+analyze_*.js
+add_*.js
+restore_*.js
+reset_*.js
+cleanup_*.js
+optimize_*.js
+list_*.js
+trigger_*.js
+update_*.js
+run_*.js
+
+# Database scripts
+*.sql
+!database_schema.sql
+
+# Batch scripts
+*.bat
+
+# Temporary files
+*.tmp
+*.temp
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude AI
+.claude/
+
+# Documentation (ลบบรรทัดนี้ถ้าต้องการเก็บ)
+*.md
+!README.md

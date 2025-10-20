@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Test Light Control Functions</title>
+</head>
+<body>
+    <h1>Testing Light Control Functions</h1>
+    <div id="output"></div>
+
+    <script>
+        // ทดสอบว่าฟังก์ชันมีอยู่จริงหรือไม่
+        const functionsToTest = [
+            'toggleDevice',
+            'loadLightStatesFromDB',
+            'renderLightControlPage',
+            'openLightControlModal',
+            'closeLightControlModal',
+            'saveBatchSchedules',
+            'toggleDeviceSchedule'
+        ];
+
+        const output = document.getElementById('output');
+        let html = '<h2>Function Check Results:</h2><ul>';
+
+        functionsToTest.forEach(funcName => {
+            const exists = typeof window[funcName] === 'function';
+            html += `<li><strong>${funcName}:</strong> ${exists ? '✅ EXISTS' : '❌ NOT FOUND'}</li>`;
+        });
+
+        html += '</ul>';
+        output.innerHTML = html;
+
+        console.log('=== Light Control Function Test ===');
+        functionsToTest.forEach(funcName => {
+            console.log(`${funcName}: ${typeof window[funcName] === 'function' ? 'EXISTS' : 'NOT FOUND'}`);
+        });
+    </script>
+</body>
+</html>

@@ -1,0 +1,1019 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ระบบควบคุมน้ำ - Water Control System</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        * {
+            font-family: 'Sarabun', sans-serif;
+        }
+
+        /* Custom Gradient Animations */
+        @keyframes gradient {
+            0% { background-position: 0% 50%; }
+            50% { background-position: 100% 50%; }
+            100% { background-position: 0% 50%; }
+        }
+
+        .bg-animated {
+            background: linear-gradient(-45deg, #0ea5e9, #06b6d4, #3b82f6, #6366f1);
+            background-size: 400% 400%;
+            animation: gradient 15s ease infinite;
+        }
+
+        /* Water Drop Animation */
+        @keyframes drop {
+            0%, 100% { transform: translateY(0); }
+            50% { transform: translateY(-10px); }
+        }
+
+        .water-drop {
+            animation: drop 2s ease-in-out infinite;
+        }
+
+        /* Ripple Effect */
+        @keyframes ripple {
+            0% { transform: scale(0.8); opacity: 0.8; }
+            100% { transform: scale(2); opacity: 0; }
+        }
+
+        .ripple::before {
+            content: '';
+            position: absolute;
+            inset: 0;
+            border-radius: 50%;
+            background: radial-gradient(circle, rgba(59, 130, 246, 0.4), transparent);
+            animation: ripple 2s ease-out infinite;
+        }
+
+        /* Valve Card Hover */
+        .valve-card {
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            position: relative;
+            overflow: hidden;
+        }
+
+        .valve-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: -100%;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.3), transparent);
+            transition: left 0.5s;
+        }
+
+        .valve-card:hover::before {
+            left: 100%;
+        }
+
+        .valve-card:hover {
+            transform: translateY(-8px) scale(1.05);
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.2);
+        }
+
+        .valve-card.active {
+            animation: pulse 2s ease-in-out infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(1.02); }
+        }
+
+        /* Toggle Switch */
+        .toggle-switch {
+            position: relative;
+            width: 60px;
+            height: 30px;
+        }
+
+        .toggle-switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+
+        .toggle-slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: #cbd5e1;
+            transition: 0.4s;
+            border-radius: 30px;
+        }
+
+        .toggle-slider:before {
+            position: absolute;
+            content: "";
+            height: 22px;
+            width: 22px;
+            left: 4px;
+            bottom: 4px;
+            background-color: white;
+            transition: 0.4s;
+            border-radius: 50%;
+        }
+
+        input:checked + .toggle-slider {
+            background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+        }
+
+        input:checked + .toggle-slider:before {
+            transform: translateX(30px);
+        }
+
+        /* Range Slider */
+        input[type="range"] {
+            -webkit-appearance: none;
+            width: 100%;
+            height: 8px;
+            border-radius: 5px;
+            background: linear-gradient(to right, #e2e8f0 0%, #3b82f6 0%);
+            outline: none;
+        }
+
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 24px;
+            height: 24px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%);
+            cursor: pointer;
+            box-shadow: 0 4px 8px rgba(59, 130, 246, 0.4);
+            transition: all 0.3s;
+        }
+
+        input[type="range"]::-webkit-slider-thumb:hover {
+            transform: scale(1.2);
+            box-shadow: 0 6px 12px rgba(59, 130, 246, 0.6);
+        }
+
+        input[type="range"]::-moz-range-thumb {
+            width: 24px;
+            height: 24px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%);
+            cursor: pointer;
+            box-shadow: 0 4px 8px rgba(59, 130, 246, 0.4);
+            border: none;
+        }
+
+        /* Loading Spinner */
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .spinner {
+            animation: spin 1s linear infinite;
+        }
+
+        /* Fade In Animation */
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .fade-in {
+            animation: fadeIn 0.5s ease-out;
+        }
+
+        /* Glass Morphism */
+        .glass {
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            border: 1px solid rgba(255, 255, 255, 0.3);
+        }
+
+        /* Status Indicator */
+        @keyframes blink {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .status-online {
+            animation: blink 2s ease-in-out infinite;
+        }
+    </style>
+</head>
+<body class="bg-gray-50 min-h-screen">
+    <!-- Background -->
+    <div class="fixed inset-0 bg-animated -z-10"></div>
+
+    <!-- Main Container -->
+    <div class="min-h-screen pb-8">
+        <!-- Header -->
+        <header class="glass sticky top-0 z-50 shadow-2xl">
+            <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
+                <div class="flex items-center justify-between">
+                    <!-- Logo & Title -->
+                    <div class="flex items-center gap-4">
+                        <div class="relative">
+                            <div class="w-14 h-14 bg-gradient-to-br from-blue-500 via-cyan-500 to-blue-600 rounded-2xl flex items-center justify-center water-drop shadow-lg">
+                                <i class="fas fa-water text-white text-2xl"></i>
+                            </div>
+                            <div class="absolute -bottom-1 -right-1 w-4 h-4 bg-green-500 rounded-full border-2 border-white status-online"></div>
+                        </div>
+                        <div>
+                            <h1 class="text-2xl sm:text-3xl font-bold text-gray-800 tracking-tight">ระบบควบคุมน้ำ</h1>
+                            <p class="text-sm text-gray-600 flex items-center gap-2">
+                                <i class="fas fa-droplet text-blue-500"></i>
+                                Smart Water Control System
+                            </p>
+                        </div>
+                    </div>
+
+                    <!-- Actions -->
+                    <div class="flex items-center gap-3">
+                        <!-- System Status -->
+                        <div class="hidden sm:flex items-center gap-2 bg-gradient-to-r from-green-50 to-emerald-50 px-4 py-2 rounded-xl border border-green-200">
+                            <div class="w-3 h-3 bg-green-500 rounded-full status-online shadow-lg shadow-green-500/50"></div>
+                            <span class="text-sm font-semibold text-green-700">ออนไลน์</span>
+                        </div>
+
+                        <!-- Refresh Button -->
+                        <button onclick="refreshData()"
+                                class="p-3 bg-white hover:bg-gray-50 rounded-xl shadow-md hover:shadow-lg transition-all group border border-gray-200">
+                            <i class="fas fa-sync-alt text-gray-600 group-hover:rotate-180 transition-transform duration-500"></i>
+                        </button>
+
+                        <!-- Back to Home -->
+                        <button onclick="window.location.href='index.html'"
+                                class="hidden sm:flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-blue-500 to-blue-600 hover:from-blue-600 hover:to-blue-700 text-white font-semibold rounded-xl shadow-md hover:shadow-lg transition-all">
+                            <i class="fas fa-home"></i>
+                            <span>หน้าหลัก</span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
+
+            <!-- Summary Overview Card -->
+            <section class="fade-in">
+                <div class="glass rounded-3xl shadow-2xl p-8 border-2 border-white/30">
+                    <div class="flex items-center gap-3 mb-6">
+                        <div class="w-12 h-12 bg-gradient-to-br from-blue-500 via-cyan-500 to-teal-500 rounded-2xl flex items-center justify-center shadow-xl">
+                            <i class="fas fa-chart-line text-white text-xl"></i>
+                        </div>
+                        <div>
+                            <h2 class="text-2xl font-bold text-gray-800">ภาพรวมระบบน้ำ</h2>
+                            <p class="text-sm text-gray-600">Water System Overview</p>
+                        </div>
+                    </div>
+
+                    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+                        <!-- Total Water Volume Card -->
+                        <div class="bg-gradient-to-br from-blue-50 to-cyan-50 rounded-2xl p-6 border border-blue-100">
+                            <div class="flex items-center justify-between mb-3">
+                                <div class="w-12 h-12 bg-gradient-to-br from-blue-500 to-cyan-600 rounded-xl flex items-center justify-center shadow-lg">
+                                    <i class="fas fa-water text-white text-xl"></i>
+                                </div>
+                                <span class="text-xs font-semibold text-blue-600 bg-blue-100 px-3 py-1 rounded-full">ปริมาณรวม</span>
+                            </div>
+                            <div class="text-3xl font-bold text-blue-700 mb-1" id="totalWaterVolume">2,458</div>
+                            <div class="text-sm text-gray-600">ลิตร/วัน</div>
+                        </div>
+
+                        <!-- Active Valves Card -->
+                        <div class="bg-gradient-to-br from-green-50 to-emerald-50 rounded-2xl p-6 border border-green-100">
+                            <div class="flex items-center justify-between mb-3">
+                                <div class="w-12 h-12 bg-gradient-to-br from-green-500 to-emerald-600 rounded-xl flex items-center justify-center shadow-lg">
+                                    <i class="fas fa-faucet-drip text-white text-xl"></i>
+                                </div>
+                                <span class="text-xs font-semibold text-green-600 bg-green-100 px-3 py-1 rounded-full">กำลังทำงาน</span>
+                            </div>
+                            <div class="text-3xl font-bold text-green-700 mb-1" id="summaryActiveValves">0</div>
+                            <div class="text-sm text-gray-600">วาล์วที่เปิดอยู่</div>
+                        </div>
+
+                        <!-- Current EC Card -->
+                        <div class="bg-gradient-to-br from-amber-50 to-orange-50 rounded-2xl p-6 border border-orange-100">
+                            <div class="flex items-center justify-between mb-3">
+                                <div class="w-12 h-12 bg-gradient-to-br from-amber-500 to-orange-600 rounded-xl flex items-center justify-center shadow-lg">
+                                    <i class="fas fa-flask text-white text-xl"></i>
+                                </div>
+                                <span class="text-xs font-semibold text-orange-600 bg-orange-100 px-3 py-1 rounded-full">ค่า EC</span>
+                            </div>
+                            <div class="text-3xl font-bold text-orange-700 mb-1" id="summaryECValue">1.5</div>
+                            <div class="text-sm text-gray-600">mS/cm</div>
+                        </div>
+
+                        <!-- Water Level Card -->
+                        <div class="bg-gradient-to-br from-purple-50 to-pink-50 rounded-2xl p-6 border border-purple-100">
+                            <div class="flex items-center justify-between mb-3">
+                                <div class="w-12 h-12 bg-gradient-to-br from-purple-500 to-pink-600 rounded-xl flex items-center justify-center shadow-lg">
+                                    <i class="fas fa-tint text-white text-xl"></i>
+                                </div>
+                                <span class="text-xs font-semibold text-purple-600 bg-purple-100 px-3 py-1 rounded-full">ระดับน้ำ</span>
+                            </div>
+                            <div class="text-3xl font-bold text-purple-700 mb-1" id="summaryWaterLevel">75</div>
+                            <div class="text-sm text-gray-600">เปอร์เซ็นต์</div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Home System Section -->
+            <section class="fade-in">
+                <div class="flex items-center gap-3 mb-6">
+                    <div class="w-10 h-10 bg-gradient-to-br from-purple-500 to-pink-500 rounded-xl flex items-center justify-center shadow-lg">
+                        <i class="fas fa-home text-white"></i>
+                    </div>
+                    <div>
+                        <h2 class="text-2xl font-bold text-white drop-shadow-lg">ระบบน้ำหลัก</h2>
+                        <p class="text-sm text-white/90">Home Water System</p>
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                    <!-- EC Control Card -->
+                    <div class="glass rounded-2xl shadow-2xl p-6 transform hover:scale-105 transition-all">
+                        <div class="flex items-center justify-between mb-4">
+                            <div class="flex items-center gap-3">
+                                <div class="w-12 h-12 bg-gradient-to-br from-amber-400 to-orange-500 rounded-xl flex items-center justify-center shadow-lg">
+                                    <i class="fas fa-flask text-white text-xl"></i>
+                                </div>
+                                <div>
+                                    <h3 class="text-lg font-bold text-gray-800">ค่า EC</h3>
+                                    <p class="text-xs text-gray-600">Electrical Conductivity</p>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="text-center mb-6">
+                            <div class="flex items-end justify-center gap-2">
+                                <span class="text-6xl font-bold bg-gradient-to-r from-amber-500 to-orange-600 bg-clip-text text-transparent" id="ecValue">1.5</span>
+                                <span class="text-xl text-gray-500 mb-2">mS/cm</span>
+                            </div>
+                        </div>
+                        <input type="range" id="ecSlider" class="w-full mb-3" min="0.5" max="3.0" step="0.1" value="1.5"
+                               oninput="updateECDisplay(this.value)">
+                        <div class="flex justify-between text-xs text-gray-600 px-1">
+                            <span class="font-semibold">0.5</span>
+                            <span class="font-semibold">1.75</span>
+                            <span class="font-semibold">3.0</span>
+                        </div>
+                    </div>
+
+                    <!-- Water Level Card -->
+                    <div class="glass rounded-2xl shadow-2xl p-6 transform hover:scale-105 transition-all">
+                        <div class="flex items-center justify-between mb-4">
+                            <div class="flex items-center gap-3">
+                                <div class="w-12 h-12 bg-gradient-to-br from-cyan-400 to-blue-500 rounded-xl flex items-center justify-center shadow-lg">
+                                    <i class="fas fa-tint text-white text-xl"></i>
+                                </div>
+                                <div>
+                                    <h3 class="text-lg font-bold text-gray-800">ระดับน้ำ</h3>
+                                    <p class="text-xs text-gray-600">Water Level</p>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="text-center mb-6">
+                            <div class="flex items-end justify-center gap-2">
+                                <span class="text-6xl font-bold bg-gradient-to-r from-cyan-500 to-blue-600 bg-clip-text text-transparent" id="waterLevelValue">75</span>
+                                <span class="text-xl text-gray-500 mb-2">%</span>
+                            </div>
+                        </div>
+                        <input type="range" id="waterLevelSlider" class="w-full mb-3" min="0" max="100" step="5" value="75"
+                               oninput="updateWaterLevelDisplay(this.value)">
+                        <div class="flex justify-between text-xs text-gray-600 px-1">
+                            <span class="font-semibold">0%</span>
+                            <span class="font-semibold">50%</span>
+                            <span class="font-semibold">100%</span>
+                        </div>
+                    </div>
+
+                    <!-- Confirm Button Card -->
+                    <div class="glass rounded-2xl shadow-2xl p-6 flex flex-col justify-center">
+                        <div class="mb-6">
+                            <h4 class="text-lg font-bold text-gray-800 mb-4 text-center">
+                                <i class="fas fa-cog text-blue-500 mr-2"></i>ตั้งค่าปัจจุบัน
+                            </h4>
+                            <div class="bg-gradient-to-br from-blue-50 to-cyan-50 rounded-xl p-5 space-y-3 border border-blue-100">
+                                <div class="flex justify-between items-center">
+                                    <div class="flex items-center gap-2">
+                                        <i class="fas fa-flask text-orange-500"></i>
+                                        <span class="text-sm text-gray-700 font-medium">EC:</span>
+                                    </div>
+                                    <span class="text-xl font-bold text-orange-600" id="ecSummary">1.5 mS/cm</span>
+                                </div>
+                                <div class="h-px bg-gradient-to-r from-transparent via-blue-200 to-transparent"></div>
+                                <div class="flex justify-between items-center">
+                                    <div class="flex items-center gap-2">
+                                        <i class="fas fa-tint text-cyan-500"></i>
+                                        <span class="text-sm text-gray-700 font-medium">ระดับน้ำ:</span>
+                                    </div>
+                                    <span class="text-xl font-bold text-cyan-600" id="waterLevelSummary">75%</span>
+                                </div>
+                            </div>
+                        </div>
+                        <button onclick="confirmHomeWatering()"
+                                class="w-full bg-gradient-to-r from-green-500 via-emerald-500 to-green-600 hover:from-green-600 hover:via-emerald-600 hover:to-green-700 text-white font-bold py-4 rounded-xl transition-all transform hover:scale-105 shadow-xl hover:shadow-2xl group">
+                            <i class="fas fa-play-circle mr-2 group-hover:scale-110 transition-transform"></i>
+                            เริ่มเติมน้ำหลัก
+                        </button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Floor Valves Section -->
+            <section class="fade-in">
+                <div class="flex items-center gap-3 mb-6">
+                    <div class="w-10 h-10 bg-gradient-to-br from-indigo-500 to-purple-500 rounded-xl flex items-center justify-center shadow-lg">
+                        <i class="fas fa-layer-group text-white"></i>
+                    </div>
+                    <div>
+                        <h2 class="text-2xl font-bold text-white drop-shadow-lg">ระบบวาล์วแต่ละชั้น</h2>
+                        <p class="text-sm text-white/90">Floor Valve Control System</p>
+                    </div>
+                </div>
+
+                <!-- Floor Tabs -->
+                <div class="flex gap-2 mb-6 overflow-x-auto pb-2 scrollbar-hide">
+                    <button onclick="selectFloor(1)" id="floorTab1"
+                            class="floor-tab flex-shrink-0 px-6 py-3 glass rounded-xl font-semibold text-gray-700 hover:shadow-lg transition-all shadow-md border-2 border-blue-500">
+                        <i class="fas fa-building mr-2"></i>ชั้น 1
+                    </button>
+                    <button onclick="selectFloor(2)" id="floorTab2"
+                            class="floor-tab flex-shrink-0 px-6 py-3 glass rounded-xl font-semibold text-gray-600 hover:shadow-lg transition-all border-2 border-transparent">
+                        <i class="fas fa-building mr-2"></i>ชั้น 2
+                    </button>
+                    <button onclick="selectFloor(3)" id="floorTab3"
+                            class="floor-tab flex-shrink-0 px-6 py-3 glass rounded-xl font-semibold text-gray-600 hover:shadow-lg transition-all border-2 border-transparent">
+                        <i class="fas fa-building mr-2"></i>ชั้น 3
+                    </button>
+                    <button onclick="selectFloor(4)" id="floorTab4"
+                            class="floor-tab flex-shrink-0 px-6 py-3 glass rounded-xl font-semibold text-gray-600 hover:shadow-lg transition-all border-2 border-transparent">
+                        <i class="fas fa-building mr-2"></i>ชั้น 4
+                    </button>
+                    <button onclick="selectFloor(5)" id="floorTab5"
+                            class="floor-tab flex-shrink-0 px-6 py-3 glass rounded-xl font-semibold text-gray-600 hover:shadow-lg transition-all border-2 border-transparent">
+                        <i class="fas fa-building mr-2"></i>ชั้น 5
+                    </button>
+                </div>
+
+                <!-- Floor Content -->
+                <div id="floorContent" class="glass rounded-2xl shadow-2xl p-6">
+                    <div class="flex items-center justify-center py-12">
+                        <div class="text-center">
+                            <i class="fas fa-spinner spinner text-4xl text-blue-500 mb-4"></i>
+                            <p class="text-gray-600">กำลังโหลดข้อมูล...</p>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Statistics Section -->
+            <section class="fade-in">
+                <div class="flex items-center gap-3 mb-6">
+                    <div class="w-10 h-10 bg-gradient-to-br from-pink-500 to-rose-500 rounded-xl flex items-center justify-center shadow-lg">
+                        <i class="fas fa-chart-bar text-white"></i>
+                    </div>
+                    <div>
+                        <h2 class="text-2xl font-bold text-white drop-shadow-lg">สถิติการใช้งาน</h2>
+                        <p class="text-sm text-white/90">System Statistics</p>
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6">
+                    <div class="glass rounded-2xl shadow-xl p-6 text-center transform hover:scale-105 transition-all group">
+                        <div class="w-14 h-14 bg-gradient-to-br from-blue-400 to-blue-600 rounded-xl mx-auto mb-4 flex items-center justify-center shadow-lg group-hover:shadow-blue-500/50 transition-shadow">
+                            <i class="fas fa-faucet text-white text-2xl"></i>
+                        </div>
+                        <div class="text-4xl font-bold text-blue-600 mb-2" id="totalValvesOpen">0</div>
+                        <div class="text-sm text-gray-600 font-medium">วาล์วเปิดอยู่</div>
+                    </div>
+
+                    <div class="glass rounded-2xl shadow-xl p-6 text-center transform hover:scale-105 transition-all group">
+                        <div class="w-14 h-14 bg-gradient-to-br from-green-400 to-green-600 rounded-xl mx-auto mb-4 flex items-center justify-center shadow-lg group-hover:shadow-green-500/50 transition-shadow">
+                            <i class="fas fa-check-circle text-white text-2xl"></i>
+                        </div>
+                        <div class="text-4xl font-bold text-green-600 mb-2">90</div>
+                        <div class="text-sm text-gray-600 font-medium">วาล์วทั้งหมด</div>
+                    </div>
+
+                    <div class="glass rounded-2xl shadow-xl p-6 text-center transform hover:scale-105 transition-all group">
+                        <div class="w-14 h-14 bg-gradient-to-br from-purple-400 to-purple-600 rounded-xl mx-auto mb-4 flex items-center justify-center shadow-lg group-hover:shadow-purple-500/50 transition-shadow">
+                            <i class="fas fa-percentage text-white text-2xl"></i>
+                        </div>
+                        <div class="text-4xl font-bold text-purple-600 mb-2">98%</div>
+                        <div class="text-sm text-gray-600 font-medium">ประสิทธิภาพ</div>
+                    </div>
+
+                    <div class="glass rounded-2xl shadow-xl p-6 text-center transform hover:scale-105 transition-all group">
+                        <div class="w-14 h-14 bg-gradient-to-br from-orange-400 to-orange-600 rounded-xl mx-auto mb-4 flex items-center justify-center shadow-lg group-hover:shadow-orange-500/50 transition-shadow">
+                            <i class="fas fa-droplet text-white text-2xl"></i>
+                        </div>
+                        <div class="text-4xl font-bold text-orange-600 mb-2">2,458</div>
+                        <div class="text-sm text-gray-600 font-medium">ลิตร/วัน</div>
+                    </div>
+                </div>
+            </section>
+
+        </main>
+    </div>
+
+    <!-- Confirmation Modal -->
+    <div id="confirmModal" class="fixed inset-0 bg-black/60 backdrop-blur-sm hidden items-center justify-center z-50 p-4">
+        <div class="glass rounded-3xl shadow-2xl p-8 max-w-md w-full transform transition-all scale-95 border border-white/50" onclick="event.stopPropagation()">
+            <div class="text-center mb-6">
+                <div class="w-20 h-20 bg-gradient-to-br from-blue-500 via-purple-500 to-pink-500 rounded-full mx-auto mb-4 flex items-center justify-center shadow-2xl">
+                    <i class="fas fa-question text-white text-3xl"></i>
+                </div>
+                <h3 class="text-2xl font-bold text-gray-800 mb-2" id="modalTitle">ยืนยันการทำงาน</h3>
+                <p class="text-gray-600 leading-relaxed" id="modalMessage">คุณแน่ใจหรือไม่?</p>
+            </div>
+            <div class="flex gap-3">
+                <button onclick="closeModal()"
+                        class="flex-1 px-6 py-3.5 bg-gray-100 hover:bg-gray-200 text-gray-800 font-semibold rounded-xl transition-all shadow-md hover:shadow-lg">
+                    <i class="fas fa-times mr-2"></i>ยกเลิก
+                </button>
+                <button onclick="confirmModalAction()"
+                        class="flex-1 px-6 py-3.5 bg-gradient-to-r from-blue-500 via-purple-500 to-pink-500 hover:from-blue-600 hover:via-purple-600 hover:to-pink-600 text-white font-semibold rounded-xl transition-all shadow-md hover:shadow-lg">
+                    <i class="fas fa-check mr-2"></i>ยืนยัน
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast Notification -->
+    <div id="toast" class="fixed top-6 right-6 glass rounded-2xl shadow-2xl p-5 hidden z-50 transform transition-all border border-white/50 max-w-sm">
+        <div class="flex items-center gap-4">
+            <div id="toastIcon" class="w-12 h-12 rounded-xl flex items-center justify-center shadow-lg flex-shrink-0">
+                <i class="fas fa-check text-white text-xl"></i>
+            </div>
+            <div class="flex-1 min-w-0">
+                <div id="toastTitle" class="font-bold text-gray-800 text-lg truncate">สำเร็จ</div>
+                <div id="toastMessage" class="text-sm text-gray-600 line-clamp-2">ดำเนินการสำเร็จ</div>
+            </div>
+            <button onclick="hideToast()" class="text-gray-400 hover:text-gray-600 transition-colors">
+                <i class="fas fa-times"></i>
+            </button>
+        </div>
+    </div>
+
+    <!-- Loading Overlay -->
+    <div id="loadingOverlay" class="fixed inset-0 bg-black/50 backdrop-blur-sm hidden items-center justify-center z-50">
+        <div class="glass rounded-2xl p-8 text-center">
+            <i class="fas fa-spinner spinner text-5xl text-blue-500 mb-4"></i>
+            <p class="text-gray-800 font-semibold text-lg">กำลังประมวลผล...</p>
+        </div>
+    </div>
+
+    <script>
+        // ===== Global Variables =====
+        let currentFloor = 1;
+        let modalCallback = null;
+        let waterSystemData = {
+            homeSettings: {
+                ecValue: 1.5,
+                waterLevel: 75,
+                isActive: true
+            },
+            floors: []
+        };
+        let autoRefreshInterval = null;
+
+        // ===== Initialize =====
+        document.addEventListener('DOMContentLoaded', function() {
+            console.log('🌊 Water Control System Initializing...');
+            loadWaterSystemData();
+            selectFloor(1);
+            startAutoRefresh();
+
+            // Update slider backgrounds on load
+            updateSliderBackground('ecSlider', 1.5, 0.5, 3.0);
+            updateSliderBackground('waterLevelSlider', 75, 0, 100);
+        });
+
+        // ===== Load Water System Data from API =====
+        async function loadWaterSystemData() {
+            try {
+                const response = await fetch('/api/water-system');
+                if (response.ok) {
+                    const data = await response.json();
+                    console.log('✅ Water system data loaded:', data);
+
+                    waterSystemData = data;
+
+                    // Update Home Settings Display
+                    if (data.homeSettings) {
+                        const ec = parseFloat(data.homeSettings.ecValue) || 1.5;
+                        const level = parseInt(data.homeSettings.waterLevel) || 75;
+
+                        document.getElementById('ecValue').textContent = ec.toFixed(1);
+                        document.getElementById('ecSlider').value = ec;
+                        document.getElementById('waterLevelValue').textContent = level;
+                        document.getElementById('waterLevelSlider').value = level;
+                        document.getElementById('ecSummary').textContent = ec.toFixed(1) + ' mS/cm';
+                        document.getElementById('waterLevelSummary').textContent = level + '%';
+                        document.getElementById('summaryECValue').textContent = ec.toFixed(1);
+                        document.getElementById('summaryWaterLevel').textContent = level;
+
+                        updateSliderBackground('ecSlider', ec, 0.5, 3.0);
+                        updateSliderBackground('waterLevelSlider', level, 0, 100);
+                    }
+
+                    // Refresh current floor
+                    if (currentFloor) {
+                        loadFloorValves(currentFloor);
+                    }
+
+                    updateStatistics();
+                } else {
+                    console.error('❌ Failed to load water system data');
+                    showToast('error', 'ข้อผิดพลาด', 'ไม่สามารถโหลดข้อมูลระบบน้ำได้');
+                }
+            } catch (error) {
+                console.error('❌ Error loading water system data:', error);
+                showToast('error', 'ข้อผิดพลาด', 'เกิดข้อผิดพลาดในการโหลดข้อมูล');
+            }
+        }
+
+        // ===== Update Slider Background (Gradient Effect) =====
+        function updateSliderBackground(sliderId, value, min, max) {
+            const slider = document.getElementById(sliderId);
+            const percentage = ((value - min) / (max - min)) * 100;
+            slider.style.background = `linear-gradient(to right, #3b82f6 0%, #3b82f6 ${percentage}%, #e2e8f0 ${percentage}%, #e2e8f0 100%)`;
+        }
+
+        // ===== Update EC Display =====
+        function updateECDisplay(value) {
+            const ecVal = parseFloat(value);
+            document.getElementById('ecValue').textContent = ecVal.toFixed(1);
+            document.getElementById('ecSummary').textContent = ecVal.toFixed(1) + ' mS/cm';
+            document.getElementById('summaryECValue').textContent = ecVal.toFixed(1);
+            waterSystemData.homeSettings.ecValue = ecVal;
+            updateSliderBackground('ecSlider', ecVal, 0.5, 3.0);
+        }
+
+        // ===== Update Water Level Display =====
+        function updateWaterLevelDisplay(value) {
+            const level = parseInt(value);
+            document.getElementById('waterLevelValue').textContent = level;
+            document.getElementById('waterLevelSummary').textContent = level + '%';
+            document.getElementById('summaryWaterLevel').textContent = level;
+            waterSystemData.homeSettings.waterLevel = level;
+            updateSliderBackground('waterLevelSlider', level, 0, 100);
+        }
+
+        // ===== Select Floor Tab =====
+        function selectFloor(floorNumber) {
+            currentFloor = floorNumber;
+            console.log('🏢 Selecting floor:', floorNumber);
+
+            // Update tab styles
+            document.querySelectorAll('.floor-tab').forEach(tab => {
+                tab.classList.remove('border-blue-500', 'text-gray-700', 'shadow-lg');
+                tab.classList.add('border-transparent', 'text-gray-600');
+            });
+
+            const selectedTab = document.getElementById(`floorTab${floorNumber}`);
+            selectedTab.classList.add('border-blue-500', 'text-gray-700', 'shadow-lg');
+            selectedTab.classList.remove('border-transparent', 'text-gray-600');
+
+            // Load floor valves
+            loadFloorValves(floorNumber);
+        }
+
+        // ===== Load Floor Valves =====
+        function loadFloorValves(floorNumber) {
+            const floor = waterSystemData.floors ? waterSystemData.floors.find(f => f.id === floorNumber) : null;
+            const valves = floor ? floor.valves : [];
+
+            console.log(`🚰 Loading valves for floor ${floorNumber}:`, valves);
+
+            let html = `
+                <div class="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 mb-6">
+                    <div>
+                        <h3 class="text-2xl font-bold text-gray-800 flex items-center gap-2">
+                            <i class="fas fa-building text-blue-500"></i>
+                            ชั้นที่ ${floorNumber}
+                        </h3>
+                        <p class="text-sm text-gray-600 mt-1">จัดการวาล์วทั้งหมด 18 ตัว</p>
+                    </div>
+                    <button onclick="toggleAllValves(${floorNumber})"
+                            class="w-full sm:w-auto px-6 py-3 bg-gradient-to-r from-blue-500 to-indigo-600 hover:from-blue-600 hover:to-indigo-700 text-white font-semibold rounded-xl transition-all shadow-lg hover:shadow-xl group">
+                        <i class="fas fa-power-off mr-2 group-hover:rotate-180 transition-transform duration-500"></i>
+                        เปิด/ปิดทั้งหมด
+                    </button>
+                </div>
+
+                <div class="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 gap-3 sm:gap-4">
+            `;
+
+            for (let i = 1; i <= 18; i++) {
+                const valve = valves.find(v => v.id === i) || { id: i, status: 'closed' };
+                const isOpen = valve.status === 'open';
+                const bgClass = isOpen
+                    ? 'from-green-400 via-green-500 to-emerald-600'
+                    : 'from-gray-300 via-gray-400 to-gray-500';
+                const iconClass = isOpen ? 'fa-faucet-drip' : 'fa-faucet';
+                const activeClass = isOpen ? 'active' : '';
+
+                html += `
+                    <div class="valve-card ${activeClass} bg-gradient-to-br ${bgClass} rounded-2xl p-4 text-center cursor-pointer shadow-lg hover:shadow-2xl"
+                         onclick="toggleValve(${floorNumber}, ${i}, ${!isOpen})">
+                        <div class="flex flex-col items-center gap-2">
+                            <i class="fas ${iconClass} text-white text-3xl drop-shadow-lg"></i>
+                            <div class="text-white font-bold text-lg">V${i}</div>
+                            <div class="text-white/90 text-xs font-semibold px-3 py-1 bg-white/20 rounded-full">
+                                ${isOpen ? '🟢 เปิด' : '🔴 ปิด'}
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }
+
+            html += `</div>`;
+            document.getElementById('floorContent').innerHTML = html;
+        }
+
+        // ===== Confirm Home Watering =====
+        async function confirmHomeWatering() {
+            const ec = waterSystemData.homeSettings.ecValue;
+            const level = waterSystemData.homeSettings.waterLevel;
+
+            showModal(
+                'เริ่มเติมน้ำหลัก',
+                `คุณต้องการเริ่มเติมน้ำหลักด้วยค่า EC: ${ec.toFixed(1)} mS/cm และระดับน้ำ: ${level}% หรือไม่?`,
+                async () => {
+                    showLoading();
+                    const success = await sendHomeWateringCommand(ec, level);
+                    hideLoading();
+
+                    if (success) {
+                        showToast('success', 'สำเร็จ', 'ส่งคำสั่งเติมน้ำหลักเรียบร้อยแล้ว');
+                    } else {
+                        showToast('error', 'ข้อผิดพลาด', 'ไม่สามารถส่งคำสั่งได้ กรุณาลองใหม่อีกครั้ง');
+                    }
+                }
+            );
+        }
+
+        // ===== Send Home Watering Command (API) =====
+        async function sendHomeWateringCommand(ecValue, waterLevel) {
+            try {
+                const payload = {
+                    Key: "142B2FC933E0",
+                    Profile: Math.floor(ecValue).toString(),
+                    Device: "Open"
+                };
+
+                console.log('📤 Sending home watering command:', payload);
+
+                const response = await fetch('/api/mqtt-command', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        type: 'home',
+                        payload: payload
+                    })
+                });
+
+                const result = response.ok;
+                console.log(result ? '✅ Command sent successfully' : '❌ Command failed');
+                return result;
+            } catch (error) {
+                console.error('❌ Error sending home watering command:', error);
+                return false;
+            }
+        }
+
+        // ===== Toggle Single Valve =====
+        async function toggleValve(floorId, valveId, turnOn) {
+            try {
+                console.log(`🚰 Toggling valve - Floor: ${floorId}, Valve: ${valveId}, Turn ${turnOn ? 'ON' : 'OFF'}`);
+
+                showLoading();
+
+                const response = await fetch('/api/water-valve-command', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        floorId: floorId,
+                        valveId: valveId,
+                        status: turnOn ? 'open' : 'close',
+                        userId: 'admin'
+                    })
+                });
+
+                hideLoading();
+
+                if (response.ok) {
+                    showToast('success', 'สำเร็จ', `วาล์ว ${valveId} ${turnOn ? 'เปิด' : 'ปิด'}แล้ว`);
+
+                    // Update UI immediately
+                    setTimeout(() => {
+                        loadWaterSystemData();
+                    }, 500);
+                } else {
+                    showToast('error', 'ข้อผิดพลาด', 'ไม่สามารถส่งคำสั่งได้');
+                }
+            } catch (error) {
+                hideLoading();
+                console.error('❌ Error toggling valve:', error);
+                showToast('error', 'ข้อผิดพลาด', 'เกิดข้อผิดพลาดในการส่งคำสั่ง');
+            }
+        }
+
+        // ===== Toggle All Valves in Floor =====
+        async function toggleAllValves(floorId) {
+            showModal(
+                'เปิด/ปิดวาล์วทั้งหมด',
+                `คุณต้องการเปิดวาล์วทั้งหมดในชั้น ${floorId} หรือไม่?`,
+                async () => {
+                    showLoading();
+
+                    const promises = [];
+                    for (let valveId = 1; valveId <= 18; valveId++) {
+                        promises.push(
+                            fetch('/api/water-valve-command', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({
+                                    floorId: floorId,
+                                    valveId: valveId,
+                                    status: 'open',
+                                    userId: 'admin'
+                                })
+                            })
+                        );
+                    }
+
+                    try {
+                        await Promise.all(promises);
+                        hideLoading();
+                        showToast('success', 'สำเร็จ', `ส่งคำสั่งไปยังวาล์วทั้งหมดในชั้น ${floorId} แล้ว`);
+                        setTimeout(() => loadWaterSystemData(), 1000);
+                    } catch (error) {
+                        hideLoading();
+                        console.error('❌ Error toggling all valves:', error);
+                        showToast('error', 'ข้อผิดพลาด', 'ไม่สามารถส่งคำสั่งได้');
+                    }
+                }
+            );
+        }
+
+        // ===== Update Statistics =====
+        function updateStatistics() {
+            let totalOpen = 0;
+            let totalWaterVolume = 0;
+
+            if (waterSystemData.floors) {
+                waterSystemData.floors.forEach(floor => {
+                    if (floor.valves) {
+                        floor.valves.forEach(valve => {
+                            if (valve.status === 'open') {
+                                totalOpen++;
+                                // Calculate water volume per valve (assume 15L per valve per hour)
+                                totalWaterVolume += 15;
+                            }
+                        });
+                    }
+                });
+            }
+
+            // Update all statistics
+            document.getElementById('totalValvesOpen').textContent = totalOpen;
+            document.getElementById('summaryActiveValves').textContent = totalOpen;
+            document.getElementById('totalWaterVolume').textContent = totalWaterVolume.toLocaleString();
+        }
+
+        // ===== Refresh Data =====
+        function refreshData() {
+            console.log('🔄 Refreshing data...');
+            showToast('info', 'รีเฟรช', 'กำลังโหลดข้อมูลใหม่...');
+            loadWaterSystemData();
+        }
+
+        // ===== Auto Refresh =====
+        function startAutoRefresh() {
+            // Auto refresh every 30 seconds
+            if (autoRefreshInterval) {
+                clearInterval(autoRefreshInterval);
+            }
+            autoRefreshInterval = setInterval(() => {
+                console.log('⏰ Auto refreshing...');
+                loadWaterSystemData();
+            }, 30000);
+        }
+
+        // ===== Modal Functions =====
+        function showModal(title, message, callback) {
+            document.getElementById('modalTitle').textContent = title;
+            document.getElementById('modalMessage').textContent = message;
+            modalCallback = callback;
+            const modal = document.getElementById('confirmModal');
+            modal.classList.remove('hidden');
+            modal.classList.add('flex');
+            setTimeout(() => {
+                modal.querySelector('.glass').classList.remove('scale-95');
+                modal.querySelector('.glass').classList.add('scale-100');
+            }, 10);
+        }
+
+        function closeModal() {
+            const modal = document.getElementById('confirmModal');
+            modal.querySelector('.glass').classList.add('scale-95');
+            modal.querySelector('.glass').classList.remove('scale-100');
+            setTimeout(() => {
+                modal.classList.add('hidden');
+                modal.classList.remove('flex');
+            }, 200);
+            modalCallback = null;
+        }
+
+        function confirmModalAction() {
+            if (modalCallback) {
+                modalCallback();
+            }
+            closeModal();
+        }
+
+        // Close modal on background click
+        document.getElementById('confirmModal').addEventListener('click', function(e) {
+            if (e.target === this) {
+                closeModal();
+            }
+        });
+
+        // ===== Toast Notification =====
+        let toastTimeout = null;
+
+        function showToast(type, title, message) {
+            const toast = document.getElementById('toast');
+            const icon = document.getElementById('toastIcon');
+            const toastTitle = document.getElementById('toastTitle');
+            const toastMessage = document.getElementById('toastMessage');
+
+            // Clear existing timeout
+            if (toastTimeout) {
+                clearTimeout(toastTimeout);
+            }
+
+            // Set icon and color based on type
+            const configs = {
+                success: { icon: 'fa-check-circle', color: 'from-green-400 to-green-600' },
+                error: { icon: 'fa-times-circle', color: 'from-red-400 to-red-600' },
+                info: { icon: 'fa-info-circle', color: 'from-blue-400 to-blue-600' },
+                warning: { icon: 'fa-exclamation-triangle', color: 'from-yellow-400 to-orange-600' }
+            };
+
+            const config = configs[type] || configs.info;
+            icon.className = `w-12 h-12 rounded-xl flex items-center justify-center shadow-lg flex-shrink-0 bg-gradient-to-br ${config.color}`;
+            icon.querySelector('i').className = `fas ${config.icon} text-white text-xl`;
+            toastTitle.textContent = title;
+            toastMessage.textContent = message;
+
+            toast.classList.remove('hidden');
+
+            // Auto hide after 4 seconds
+            toastTimeout = setTimeout(() => {
+                hideToast();
+            }, 4000);
+        }
+
+        function hideToast() {
+            const toast = document.getElementById('toast');
+            toast.classList.add('hidden');
+            if (toastTimeout) {
+                clearTimeout(toastTimeout);
+                toastTimeout = null;
+            }
+        }
+
+        // ===== Loading Overlay =====
+        function showLoading() {
+            const overlay = document.getElementById('loadingOverlay');
+            overlay.classList.remove('hidden');
+            overlay.classList.add('flex');
+        }
+
+        function hideLoading() {
+            const overlay = document.getElementById('loadingOverlay');
+            overlay.classList.add('hidden');
+            overlay.classList.remove('flex');
+        }
+
+        // ===== Cleanup on page unload =====
+        window.addEventListener('beforeunload', function() {
+            if (autoRefreshInterval) {
+                clearInterval(autoRefreshInterval);
+            }
+        });
+    </script>
+</body>
+</html>
