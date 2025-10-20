@@ -1,93 +1,251 @@
-# Web_Automation
+# 🌱 AGROTECH WMS - Smart Farm Management System
 
+> ระบบจัดการฟาร์มอัจฉริยะแบบครบวงจร (Warehouse Management System + ERP) สำหรับฟาร์มแนวตั้ง (Vertical Farm / Plant Factory with Artificial Lighting)
 
+![Version](https://img.shields.io/badge/version-4.5.0-blue.svg)
+![Node](https://img.shields.io/badge/node-%3E%3D14.0.0-brightgreen.svg)
+![License](https://img.shields.io/badge/license-MIT-green.svg)
 
-## Getting started
+---
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
+## 📸 ภาพหน้าจอระบบ
 
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
+### 🏠 Dashboard หลัก
+![Dashboard](https://via.placeholder.com/800x400/40916c/ffffff?text=Dashboard+Screenshot)
 
-## Add your files
+### 📊 ระบบจัดการแผนการปลูก
+![Planting Plan](https://via.placeholder.com/800x400/52b788/ffffff?text=Planting+Plan+Management)
 
-- [ ] [Create](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#create-a-file) or [upload](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#upload-a-file) files
-- [ ] [Add files using the command line](https://docs.gitlab.com/topics/git/add_files/#add-files-to-a-git-repository) or push an existing Git repository with the following command:
+### 💧 ระบบควบคุมน้ำอัตโนมัติ
+![Water Control](https://via.placeholder.com/800x400/74c69d/ffffff?text=Smart+Water+Control)
+
+---
+
+## ✨ ฟีเจอร์หลัก
+
+### 🎯 ระบบจัดการหลัก
+- ✅ **Dashboard** - แสดงสถานะและข้อมูลแบบ Real-time
+- 📋 **Work Order System** - จัดการใบงานอัตโนมัติ (Sow, Transplant, Harvest)
+- 🌾 **Planting Plan Management** - วางแผนการปลูกและติดตามความคืบหน้า
+- 📦 **Inventory Management** - จัดการถาดปลูกและสินค้าคงคลัง
+- 📊 **Reports & Analytics** - รายงานสถิติและวิเคราะห์ข้อมูล
+
+### 🤖 ระบบควบคุมอัตโนมัติ
+- 💧 **Smart Water Control** - ควบคุมระบบน้ำอัตโนมัติผ่าน MQTT/Modbus
+- 💡 **Light Control** - ควบคุมแสงอัตโนมัติตามตารางเวลา
+- 🌡️ **Environmental Monitoring** - ตรวจสอบอุณหภูมิ ความชื้น คุณภาพอากาศ
+- ⏰ **Schedule Automation** - ตั้งเวลาทำงานอัตโนมัติ
+
+### 👥 ระบบผู้ใช้
+- 🔐 **Authentication** - ระบบ Login/Logout ที่ปลอดภัย
+- 👤 **User Management** - จัดการผู้ใช้งาน 2 ระดับ (Admin, Operator)
+- 📱 **Real-time Updates** - อัพเดทข้อมูลแบบ Real-time ด้วย WebSocket
+
+---
+
+## 🛠️ เทคโนโลยีที่ใช้
+
+### Frontend
+- **HTML5/CSS3** - โครงสร้างและการออกแบบ
+- **Tailwind CSS** - Styling framework
+- **JavaScript (Vanilla)** - Logic และ Interactivity
+- **Chart.js** - สำหรับกราฟและสถิติ
+- **MQTT.js** - การสื่อสารแบบ Real-time
+- **WebSocket** - Push notifications
+
+### Backend
+- **Node.js** - Runtime environment
+- **Express.js** - Web framework
+- **PostgreSQL** - ฐานข้อมูล
+- **MQTT** - IoT communication protocol
+- **JWT** - Authentication
+- **bcrypt** - Password encryption
+
+### IoT & Automation
+- **MQTT Broker** - Message broker สำหรับ IoT
+- **Modbus TCP/IP** - Protocol สำหรับควบคุม PLC
+
+---
+
+## 📦 การติดตั้ง
+
+### ความต้องการของระบบ
+- Node.js >= 14.0.0
+- PostgreSQL >= 12.0
+- MQTT Broker (Mosquitto หรือ HiveMQ)
+
+### ขั้นตอนการติดตั้ง
+
+1. **Clone repository**
+```bash
+git clone https://github.com/poomarin1567-dot/pfal-automation.git
+cd pfal-automation
+```
+
+2. **ติดตั้ง dependencies**
+```bash
+npm install
+```
+
+3. **ตั้งค่าฐานข้อมูล**
+```bash
+# สร้างฐานข้อมูล PostgreSQL
+createdb pfal
+
+# Import database schema (ถ้ามี)
+psql -U postgres -d pfal -f database_schema.sql
+```
+
+4. **ตั้งค่า environment variables**
+```bash
+# สร้างไฟล์ .env
+cp .env.example .env
+
+# แก้ไขค่าใน .env
+PORT=3000
+DB_HOST=localhost
+DB_PORT=5432
+DB_USER=postgres
+DB_PASSWORD=yourpassword
+DB_DATABASE=pfal
+
+MQTT_HOST=your-mqtt-broker.com
+MQTT_USERNAME=username
+MQTT_PASSWORD=password
+```
+
+5. **รันโปรเจค**
+```bash
+# Production
+npm start
+
+# Development (with auto-reload)
+npm run dev
+```
+
+6. **เปิดเว็บเบราว์เซอร์**
+```
+http://localhost:3000
+```
+
+---
+
+## 👤 การเข้าสู่ระบบ
+
+### บัญชี Demo
+- **Username**: `admin`
+- **Password**: `1234`
+
+---
+
+## 📁 โครงสร้างโปรเจค
 
 ```
-cd existing_repo
-git remote add origin https://gitlab.com/civicagrotech/web_automation.git
-git branch -M main
-git push -uf origin main
+pfal-automation/
+├── index.html              # หน้าหลัก (Login)
+├── index.js                # Backend server
+├── db.js                   # Database connection
+├── package.json            # Dependencies
+├── .env                    # Environment variables (ไม่ควร commit)
+├── .gitignore              # Git ignore rules
+├── README.md               # Documentation
+└── node_modules/           # Dependencies (auto-generated)
 ```
 
-## Integrate with your tools
+---
 
-- [ ] [Set up project integrations](https://gitlab.com/civicagrotech/web_automation/-/settings/integrations)
+## 🔒 Security Features
 
-## Collaborate with your team
+- ✅ Password hashing ด้วย bcrypt
+- ✅ JWT token authentication
+- ✅ Session management
+- ✅ SQL injection prevention
+- ✅ XSS protection
+- ✅ CORS configuration
 
-- [ ] [Invite team members and collaborators](https://docs.gitlab.com/ee/user/project/members/)
-- [ ] [Create a new merge request](https://docs.gitlab.com/ee/user/project/merge_requests/creating_merge_requests.html)
-- [ ] [Automatically close issues from merge requests](https://docs.gitlab.com/ee/user/project/issues/managing_issues.html#closing-issues-automatically)
-- [ ] [Enable merge request approvals](https://docs.gitlab.com/ee/user/project/merge_requests/approvals/)
-- [ ] [Set auto-merge](https://docs.gitlab.com/user/project/merge_requests/auto_merge/)
+---
 
-## Test and Deploy
+## 🚀 การ Deploy
 
-Use the built-in continuous integration in GitLab.
+### แนะนำ Platform (ฟรี)
 
-- [ ] [Get started with GitLab CI/CD](https://docs.gitlab.com/ee/ci/quick_start/)
-- [ ] [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/ee/user/application_security/sast/)
-- [ ] [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/ee/topics/autodevops/requirements.html)
-- [ ] [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/ee/user/clusters/agent/)
-- [ ] [Set up protected environments](https://docs.gitlab.com/ee/ci/environments/protected_environments.html)
+**Frontend**
+- Vercel
+- Netlify
+- GitHub Pages
 
-***
+**Backend**
+- Render.com
+- Railway.app
+- Heroku
 
-# Editing this README
+**Database**
+- Supabase (PostgreSQL)
+- ElephantSQL
+- Neon.tech
 
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
+---
 
-## Suggestions for a good README
+## 📝 การใช้งาน
 
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
+### 1. Dashboard
+- ดูภาพรวมของฟาร์ม
+- ติดตามสถานะ Real-time
+- ดูการแจ้งเตือน
 
-## Name
-Choose a self-explaining name for your project.
+### 2. Planting Plan
+- สร้างแผนการปลูกใหม่
+- กำหนดพันธุ์พืช จำนวน และช่วงเวลา
+- ติดตามความคืบหน้าการปลูก
 
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
+### 3. Work Orders
+- ดูรายการงานทั้งหมด
+- จัดการสถานะงาน (Pending, In Progress, Completed)
+- พิมพ์ใบงาน
 
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
+### 4. Water Control
+- ควบคุมระบบน้ำแบบ Manual/Auto
+- ตั้งเวลาการรดน้ำ
+- ดูประวัติการรดน้ำ
 
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
+### 5. Light Control
+- ควบคุมไฟแบบ Manual/Auto
+- ตั้งเวลาเปิด-ปิดไฟ
+- ปรับความเข้มแสง
 
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
+---
 
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
+## 🤝 การพัฒนา
 
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
+### Roadmap
+- [ ] Mobile Application (React Native)
+- [ ] Advanced Analytics & AI
+- [ ] Multi-farm Support
+- [ ] Automated Reporting
+- [ ] API Documentation
 
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
+### Contributing
+Pull requests are welcome! สำหรับการเปลี่ยนแปลงขนาดใหญ่ กรุณาเปิด issue เพื่อหารือก่อน
 
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
+---
 
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
+## 📄 License
 
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
+MIT License - ดูรายละเอียดใน [LICENSE](LICENSE)
 
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
+---
 
-## License
-For open source projects, say how it is licensed.
+## 👨‍💻 ผู้พัฒนา
 
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+พัฒนาโดย **Poomarin**
+- GitHub: [@poomarin1567-dot](https://github.com/poomarin1567-dot)
+
+---
+
+## 🙏 ขอบคุณ
+
+ขอบคุณ Open Source Libraries และเครื่องมือทั้งหมดที่ใช้ในโปรเจคนี้
+
+---
+
+⭐ ถ้าชอบโปรเจคนี้ กรุณากด Star ให้ด้วยนะครับ!
